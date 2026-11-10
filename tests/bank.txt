@@ -72,4 +72,36 @@
 9800 syx build/host/req.syx
 10100 shot
 
-10400 end
+# 10. the other banks. SEL held, PRESETS goes a bank at a time: U1-21 to U2-01. A bank arriving
+# now goes into U2, the bank you are in, and U1 is left as it was.
+10300 btn 3 400
+10400 enc 6 1
+10800 shot
+11000 syx build/host/bank.syx
+11100 shot
+11300 enc 6 -1
+11400 enc 6 1
+
+# 11. U2-01 is TEST 01 now. Save it to U3-05: SEL and PRESETS jump the slot two banks on, one
+# back (to the start of U2), one on again, then four slots plain.
+12400 btn 9
+12500 btn 3 400
+12600 enc 6 2
+12700 enc 6 -1
+12800 enc 6 1
+13000 enc 6 4
+13100 shot
+13200 btn 9
+13400 shot
+
+# 12. the host asks again: the bank that comes back is U3, the one this voice is in
+13500 syx build/host/req.syx
+
+# 13. back with SEL: to the start of U3, to U2, and three more round to U8, the last
+13800 btn 3 600
+13900 enc 6 -1
+14000 enc 6 -1
+14100 enc 6 -3
+14500 shot
+
+14800 end

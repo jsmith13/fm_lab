@@ -70,15 +70,22 @@ static volatile uint32_t fm1_ms;                /* milliseconds since power-on (
 #endif
 
 /* ---- flash: read anywhere; erase / program only the update's staging area, the settings sector and
- * the voice bank. Felucca's globals area is three 4 KiB sectors; the settings take the first and the
- * bank takes the other two (a 32-voice bank is 4096 B packed, which does not fit in one with a
- * header in front of it). Felucca's main store at 0x97000 is left alone, so a stock firmware put
- * back over this one still finds its samples where it left them. */
+ * the voice banks. Felucca's globals area is three 4 KiB sectors; the settings take the first and
+ * bank 0 the other two (a 32-voice bank is 4096 B packed, which does not fit in one with a header in
+ * front of it). Banks 1..7 take the 56 KiB just under the globals, at the top of the area the other
+ * firmwares of the family keep their data in, and well clear of the update's staging; the rest of
+ * that area is left alone. 1..3 came first and stay where they were; 4..7 are under them. */
 #define SETTINGS_AT 0x000FC000u                 /* one 4 KiB sector of Felucca's globals area */
-#define BANK_AT     0x000FD000u                 /* the voice bank: the other two */
+#define BANK_AT     0x000FD000u                 /* bank 0: the other two */
+#define BANK_HI_AT  0x000F6000u                 /* banks 1, 2, 3: two sectors each, up to SETTINGS_AT */
+#define BANK_LO_AT  0x000EE000u                 /* banks 4, 5, 6, 7: likewise, up to BANK_HI_AT */
 #define BANK_SECTORS 2u
+#define BANK_N      8u
+#define BANK_ADDR(b) ((b) == 0u ? BANK_AT : (b) < 4u ? BANK_HI_AT + ((b) - 1u) * BANK_SECTORS * 0x1000u : \
+                      BANK_LO_AT + ((b) - 4u) * BANK_SECTORS * 0x1000u)
 #define FL_RANGE_OK(off, n) (FL_IN(off, n, FL_OTA_LO, FL_OTA_HI) || FL_IN(off, n, SETTINGS_AT, SETTINGS_AT + 0x1000u) || \
-                             FL_IN(off, n, BANK_AT, BANK_AT + BANK_SECTORS * 0x1000u))
+                             FL_IN(off, n, BANK_AT, BANK_AT + BANK_SECTORS * 0x1000u) || \
+                             FL_IN(off, n, BANK_LO_AT, SETTINGS_AT))
 #include "fm1_flash.h"
 static uint8_t flash_ok;
 static int st_read(uint32_t off, void *dst, uint32_t n)
@@ -185,36 +192,36 @@ static int settings_save(const void *p, uint32_t n)   /* p in RAM, n <= 256 */
     return fl_write(SETTINGS_AT, (const uint8_t *)h, sizeof h);   /* the header last: a cut save stays invalid */
 }
 
-/* ---- the voice bank: the same header, in its own two sectors. The payload is whatever the app
- * hands over (fmlab.c: 32 packed DX7 voices, 4096 B). Two erases, so about 100 ms without sound:
- * write it when nothing is playing. A cut write leaves no valid header and the bank reads as empty,
+/* ---- the voice banks: the same header, each in its own two sectors. The payload is whatever the
+ * app hands over (fmlab.c: 32 packed DX7 voices, 4096 B). Two erases, so about 100 ms without sound:
+ * write one when nothing is playing. A cut write leaves no valid header and that bank reads as empty,
  * which is the right way round -- a half-written bank must never look like a good one. */
 #define BANK_MAGIC 0x424C4D46u                  /* "FMLB" */
-static int bank_read(void *p, uint32_t n)       /* 0: read and checked; else p holds nothing worth having */
+static int bank_read(uint32_t b, void *p, uint32_t n)   /* 0: read and checked; else p holds nothing worth having */
 {
-    uint32_t h[3];
-    if (!flash_ok || n > BANK_SECTORS * 0x1000u - 16u || st_read(BANK_AT, h, sizeof h) ||
+    uint32_t h[3], at = BANK_ADDR(b);
+    if (!flash_ok || b >= BANK_N || n > BANK_SECTORS * 0x1000u - 16u || st_read(at, h, sizeof h) ||
         h[0] != BANK_MAGIC || h[1] != n)
         return -1;
-    if (st_read(BANK_AT + 16u, p, n))
+    if (st_read(at + 16u, p, n))
         return -1;
     if (crc32(p, n) != h[2])
         return -1;
     return 0;
 }
-static int bank_write(const void *p, uint32_t n)
+static int bank_write(uint32_t b, const void *p, uint32_t n)
 {
-    uint32_t h[3] = {BANK_MAGIC, n, 0}, took, s;
+    uint32_t h[3] = {BANK_MAGIC, n, 0}, took, s, at = BANK_ADDR(b);
     int rc;
-    if (!flash_ok || n > BANK_SECTORS * 0x1000u - 16u)
+    if (!flash_ok || b >= BANK_N || n > BANK_SECTORS * 0x1000u - 16u)
         return -1;
     h[2] = crc32(p, n);
     for (s = 0; s < BANK_SECTORS; s++)
-        if ((rc = fl_erase4k(BANK_AT + s * 0x1000u, &took)) != 0)
+        if ((rc = fl_erase4k(at + s * 0x1000u, &took)) != 0)
             return rc;
-    if ((rc = fl_write(BANK_AT + 16u, p, n)) != 0)
+    if ((rc = fl_write(at + 16u, p, n)) != 0)
         return rc;
-    return fl_write(BANK_AT, (const uint8_t *)h, sizeof h);
+    return fl_write(at, (const uint8_t *)h, sizeof h);
 }
 
 /* ---- MIDI in: 4-byte USB-MIDI packets, cable 0 from USB and the 3.5 mm jack alike; out: USB only */

@@ -61,6 +61,8 @@ case "$script" in
 */operators.txt) python3 tests/wavcheck.py "$out".wav ;;    # the switches have to agree with the sound
 */bank.txt) python3 tests/syxcheck.py "$out" ;;             # and what was stored with what was sent
 */depth.txt) python3 tests/depthcheck.py build/host ;;      # and the 24 bits the DAC is given
-*/alias.txt) python3 tests/aliascheck.py build/host ;;      # and OVERSAMPLE, against what folds back
+*/alias.txt) python3 tests/aliascheck.py build/host ;;      # and 88.2K, against what folds back
 */bits.txt)  python3 tests/bitscheck.py build/host ;;       # and BIT DEPTH, against its grid
+*/mono.txt)  python3 tests/monocheck.py build/host ;;       # and OUTPUT, stereo and mono
+*/srate.txt) python3 tests/sratecheck.py build/host ;;      # and SAMPLE RATE, held at each step
 esac

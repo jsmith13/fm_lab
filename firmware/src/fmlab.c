@@ -97,23 +97,26 @@ static uint8_t opmute;
  * same parameter two ways in succession is how you find out what it does. */
 static uint8_t other[DX_VSZ];
 static uint8_t ab;                              /* which side `edit` is: 0 = A, 1 = B */
-static uint8_t other_mod, other_voice;
+static uint8_t other_mod;
+static uint16_t other_voice;
 
-/* ---- the bank: 32 slots of your own in flash, kept in the DX7's packed 128-byte form, which is
- * exactly what a .syx carries. The bank in RAM, the bank in flash and a bulk dump on the wire are
- * then all the same 4096 bytes, and bankmsg holds them with the SysEx wrapper already around them,
- * so a dump out costs no copy and no second buffer.
+/* ---- the bank: 256 slots of your own in flash, as eight banks of 32, each kept in the DX7's packed
+ * 128-byte form, which is exactly what a .syx carries. A bank in RAM, a bank in flash and a bulk dump
+ * on the wire are then all the same 4096 bytes; bankmsg wraps one bank in its SysEx on the way out.
  *
  * An unwritten slot holds INIT VOICE rather than being marked empty, which is both less state and
  * truer to the instrument: a slot always holds a voice, and until you put something in it that
  * voice is a sine wave.
  *
- * The voice knob runs over the 20 built-in voices and then your 32: 0..19 factory, 20..51 slots. */
-#define NUSER 32u
+ * The voice knob runs over the 20 built-in voices and then your 256: 0..19 factory, 20..275 slots,
+ * shown as U1-01 .. U8-32. */
+#define BANK_V 32u                              /* voices in a bank: a DX7 bulk dump */
+#define NBANK 8u
+#define NUSER (NBANK * BANK_V)
 #define NVOICE (DX_NVOICES + NUSER)
 
-static uint8_t bankmsg[6u + NUSER * 128u + 2u];   /* F0 43 00 09 20 00 <4096> sum F7 */
-static uint8_t *const bankv = bankmsg + 6u;       /* the 32 packed voices inside it */
+static uint8_t bankv[NUSER * 128u];             /* the eight banks, one after the other: 32 KiB */
+static uint8_t bankmsg[6u + BANK_V * 128u + 2u];  /* F0 43 00 09 20 00 <4096> sum F7: one bank, going out */
 
 /* what the voice line says instead of the voice, while saving or just after something arrived */
 static uint8_t saving, save_slot;
@@ -130,21 +133,40 @@ static void say(const char *m)                  /* a word on the voice line for 
 static void bank_init(void)
 {
     uint8_t u[DX_VSZ];
-    uint32_t i;
+    uint32_t i, b;
     bankmsg[0] = 0xF0; bankmsg[1] = 0x43; bankmsg[2] = 0x00;
     bankmsg[3] = 0x09; bankmsg[4] = 0x20; bankmsg[5] = 0x00;   /* 32-voice bulk dump, 4096 bytes */
     bankmsg[sizeof bankmsg - 1u] = 0xF7;
-    if (bank_read(bankv, NUSER * 128u) == 0)
-        return;
-    dx_init_voice(u);                           /* no bank yet, or a cut write: 32 sine waves */
-    for (i = 0; i < NUSER; i++)
-        dx_pack(u, bankv + i * 128u);
+    dx_init_voice(u);
+    for (b = 0; b < NBANK; b++) {
+        uint8_t *p = bankv + b * BANK_V * 128u;
+        if (bank_read(b, p, BANK_V * 128u) == 0)
+            continue;
+        for (i = 0; i < BANK_V; i++)            /* no bank yet, or a cut write: 32 sine waves */
+            dx_pack(u, p + i * 128u);
+    }
+}
+
+static int bank_put(uint32_t b)                 /* one bank, RAM to flash. 0: written */
+{
+    return bank_write(b, bankv + b * BANK_V * 128u, BANK_V * 128u);
 }
 
 static int bank_store(uint32_t slot, const uint8_t *u)   /* 0: written */
 {
     dx_pack(u, bankv + slot * 128u);
-    return bank_write(bankv, NUSER * 128u);
+    return bank_put(slot / BANK_V);
+}
+
+/* a slot as the screen says it: U, its bank, a dash, its place in the bank -- U1-01 .. U8-32 */
+static uint32_t put_slot(char *s, uint32_t i, uint32_t slot)
+{
+    s[i++] = 'U';
+    s[i++] = (char)('1' + slot / BANK_V);
+    s[i++] = '-';
+    s[i++] = (char)('0' + (slot % BANK_V + 1u) / 10u);
+    s[i++] = (char)('0' + (slot % BANK_V + 1u) % 10u);
+    return i;
 }
 
 /* the ten characters a voice calls itself, printable and without the spaces a DX7 pads with */
@@ -1108,7 +1130,7 @@ static void fx_run(const fx_t *x, int32_t *l, int32_t *r)
 #define OUT_SHIFT 14
 
 /* ---- 2x oversampling. FM puts partials far above 22 kHz, and at 44.1 kHz they fold back down as
- * tones that are not in the harmony: the hard, glassy edge of a bright patch. OVERSAMPLE renders the
+ * tones that are not in the harmony: the hard, glassy edge of a bright patch. SAMPLE RATE 88.2K renders the
  * operators at 88.2 kHz (dx_os) and this takes the sum back down: a half-band FIR, 63 taps (Kaiser,
  * beta 8), flat to 0.04 dB at 19 kHz, and anything that would fold below 18 kHz is 81 dB down. Every
  * other tap but the middle one is zero, and the rest are symmetric: 16 multiplies a sample. */
@@ -1117,9 +1139,17 @@ static const int32_t HB_Q[16] = {      /* Q24: the taps 1, 3, 5 .. 31 either sid
     93007, -59298, 36002, -20503, 10706, -4925, 1829, -403};
 #define HB_H 62u                                /* the history: the taps less one */
 static int32_t hb_x[HB_H + 2u * DX_N];
-static volatile uint8_t os_want;                /* the GLOBAL switch, read by the audio ISR once a render */
+static volatile uint8_t os_want;                /* SAMPLE RATE 88.2K, read by the audio ISR once a render */
+/* SAMPLE RATE under 44.1 kHz: the voices held, each value kept until the slower clock ticks again,
+ * as a DAC running at that rate would. Nothing stops what is over half the rate first, so it folds
+ * back down, the grainy top of the old samplers and the sound cards. */
+#define SR_N 7u
+#define SR_OS (SR_N - 1u)                       /* the top step: 88.2 kHz, oversampled */
+static const uint16_t SR_HZ[SR_N] = {8000, 11025, 16000, 22050, 32000, 44100, 44100};
+static volatile uint16_t sr_hz = 44100;         /* ..as the ISR reads it: under FS is held */
 static const uint8_t CRUSH_SH[4] = {16, 12, 8, 0};   /* BIT DEPTH 8 12 16 24: the bits under it, dropped */
 static volatile uint8_t crush_sh;               /* ..as the ISR reads it */
+static volatile uint8_t out_mono;               /* OUTPUT MONO: both sides the sum, for a mono plug */
 
 static void hb_down(int32_t *x)                 /* x[2 * DX_N] at 88.2 kHz, the sum -> x[DX_N], Q23 */
 {
@@ -1142,6 +1172,9 @@ static void app_audio(int32_t *out, uint32_t n)
     static int32_t mono[2 * DX_N], one[2 * DX_N];
     static int32_t dc_x, dc_y;
     static int32_t f_ic1, f_ic2;                /* the filter's two integrators */
+    static int32_t sr_held;                     /* SAMPLE RATE: the value being held.. */
+    static uint32_t sr_acc;                     /* ..and how far the slow clock is to its next tick */
+    uint32_t hz = sr_hz;
     flt_t ft = fbuf[fcur];
     const fx_t *xf = &xbuf[xcur];
     const play_t *pq = &plbuf[plcur];
@@ -1206,11 +1239,19 @@ static void app_audio(int32_t *out, uint32_t n)
             dc_x = s;
             y = sat24(y);
             dc_y = y;
+            if (hz < FS) {                      /* SAMPLE RATE: hold until the slower clock ticks */
+                sr_acc += hz;
+                if (sr_acc >= FS) {
+                    sr_acc -= FS;
+                    sr_held = y;
+                }
+                y = sr_held;
+            }
             if (crush_sh) {                     /* BIT DEPTH: rounded to the coarser step, against full
                                                  * scale, as an old DAC would. The voices only: the
                                                  * filter and the effects after it stay smooth. */
                 uint32_t sh = crush_sh;
-                y = sat24((int32_t)(((int64_t)y + (1 << (sh - 1u))) >> sh) << sh);
+                y = sat24((int32_t)(((int64_t)y + ((int64_t)1 << (sh - 1u))) >> sh) << sh);
             }
             if (ft.type) {                      /* the filter, on the finished sound, so the spectrum
                                                  * shows what it did. A state-variable filter in the
@@ -1243,6 +1284,10 @@ static void app_audio(int32_t *out, uint32_t n)
             clk_ph += clk_inc;
             clk_a -= CLK_A0 / CLK_LEN;
         }
+        if (out_mono)                           /* a mono plug hears the tip, the left: give it both
+                                                 * sides, halved, so a centred sound keeps its level */
+            for (i = 0; i < DX_N; i++)
+                mono[i] = one[i] = (mono[i] + one[i]) >> 1;
         for (i = 0; i < DX_N; i++) {
             out[2u * (b + i)] += mono[i];
             out[2u * (b + i) + 1u] += one[i];
@@ -1292,7 +1337,9 @@ enum { K_NUM = 0, K_RAT, K_DET, K_MODE, K_ONOFF, K_CURVE, K_WAVE, K_ALG, K_BRK, 
        K_VEL,                                   /* 0..99, said as the MIDI velocity it is */
        K_PLVL,                                  /* a pitch envelope level, said in semitones */
        K_MCH,                                   /* a MIDI channel, or ALL of them */
-       K_BITS };                                /* BIT DEPTH: 8 12 16 24 */
+       K_BITS,                                  /* BIT DEPTH: 8 12 16 24 */
+       K_SRATE,                                 /* SAMPLE RATE: 8K .. 44.1K, and 88.2K oversampled */
+       K_STEREO };                              /* OUTPUT: STEREO or MONO */
 
 /* The handful of switches that belong to the instrument and not to the sound. They sit in their
  * own bytes rather than in the 156, because the 156 is a DX7 voice and has no room for our
@@ -1308,8 +1355,9 @@ enum { UI_SPAN = 0, UI_GATK, UI_GDEC, UI_GSUS, UI_GREL, UI_FCUT, UI_FRES, UI_FTY
        UI_POFF,                                 /* the pitch envelope switched out, its bytes kept;
                                                  * it starts in, since it is the patch's own */
        UI_MCH, UI_PCH,                          /* MIDI: the channel (0 = all), program change on */
-       UI_OS,                                   /* 2x oversampling */
+       UI_SRATE,                                /* the sample rate: SR_HZ's steps, so 88.2K is a full bar */
        UI_BITS,                                 /* the voices' bit depth: 8 12 16 24, so 24 is a full bar */
+       UI_OUT,                                  /* the output: 0 stereo, 1 mono */
        UI_N };
 #define PL2_N 4u                                /* UI_AGATE onwards */
 #define PL_N 7u                                 /* UI_TEMPO onwards */
@@ -1669,12 +1717,18 @@ static const param_t PG_GLO[] = {
      * of the voice list for program N, and turning PRESETS sends one the other way. */
     {"MIDI CHANNEL", "MIDICH", P_UI, UI_MCH, 16, K_MCH},
     {"PROG CHANGE",  "PRG CH", P_UI, UI_PCH, 1,  K_ONOFF},
-    /* the operators at 88.2 kHz, and back down: the partials over 22 kHz go, rather than folding
-     * back as tones that are not in the harmony. OFF is the 44.1 kHz of Dexed, and half the work. */
-    {"OVERSAMPLE",   "OVERSM", P_UI, UI_OS,  1,  K_ONOFF},
+    /* the rate the voices are made at. 88.2K renders the operators at twice 44.1 and brings them
+     * back down, so the partials over 22 kHz go rather than folding back as tones that are not in
+     * the harmony; 44.1K is Dexed's, and half the work. Under that the voices are held at the
+     * slower rate, and fold as the old samplers and sound cards did: 32K the first digital
+     * keyboards, 22K and 11K the early computers, 8K the telephone. */
+    {"SAMPLE RATE",  "S RATE", P_UI, UI_SRATE, SR_N - 1u, K_SRATE},
     /* the voices cut to fewer bits before the filter and the effects: 16 is the CD, 12 the DX7's
      * DAC and the '80s samplers, 8 the home computers before them */
     {"BIT DEPTH",    "BITS",   P_UI, UI_BITS, 3, K_BITS},
+    /* the last thing before the jack: MONO is left and right summed onto both, for a mono plug,
+     * which only hears the left -- and so would lose whatever the effects put on the right */
+    {"OUTPUT",       "OUTPUT", P_UI, UI_OUT,  1, K_STEREO},
 };
 #define PG_GLO_FB 1u                            /* reached by name: HOME has a knob for it */
 /* ..and the same eight as the PIT key gives them: a rate with the level it is heading for, the way
@@ -2145,6 +2199,41 @@ static int op_key(uint32_t k)
 static uint32_t ab_t;                           /* when it went down, or 0 */
 static uint8_t ab_long;                         /* ..and the hold has already copied */
 
+/* Program change, both ways. Bank select (CC 0) 0, or none, and program N is the voice list's N+1,
+ * so the factory voices and the first of yours answer to a bare program change as they always
+ * have; bank 1..8 and program N is slot N+1 of U1..U8. Sending, the bank always goes first. */
+static uint8_t pc_bank;                         /* the last bank select heard */
+static void pc_send(uint32_t vi)
+{
+    if (vi < DX_NVOICES) {
+        midi_send(0xB0u | MIDI_TX, 0, 0);
+        midi_send(0xC0u | MIDI_TX, vi, 0);
+    } else {
+        midi_send(0xB0u | MIDI_TX, 0, 1u + (vi - DX_NVOICES) / BANK_V);
+        midi_send(0xC0u | MIDI_TX, (vi - DX_NVOICES) % BANK_V, 0);
+    }
+}
+
+/* PRESETS with SEL held: to the first voice of the next bank, or back to the first of this one (and
+ * from there to the one before). The banks of the voice list are the factory voices, then U1..U8;
+ * of the save slots, just U1..U8. Returns the new position, which may want wrapping. */
+static int32_t bank_jump(uint32_t at, int32_t enc, int voices)
+{
+    int32_t g = voices ? (at < DX_NVOICES ? 0 : 1 + (int32_t)((at - DX_NVOICES) / BANK_V)) : (int32_t)(at / BANK_V);
+    int32_t ng = voices ? (int32_t)NBANK + 1 : (int32_t)NBANK, first;
+#define GFIRST(x) (voices ? ((x) ? (int32_t)DX_NVOICES + ((x) - 1) * (int32_t)BANK_V : 0) : (x) * (int32_t)BANK_V)
+    first = GFIRST(g);
+    if (enc > 0)
+        g += enc;
+    else if ((int32_t)at != first)
+        g += enc + 1;
+    else
+        g += enc;
+    g = ((g % ng) + ng) % ng;
+    return GFIRST(g);
+#undef GFIRST
+}
+
 /* The 156 bytes hold the operators in the DX7's own order, OP6 first, and dx7_core.c indexes
  * DX_ALG with the same number -- so the block index and the engine's operator index are the one
  * thing, and opsel is both. (Proven by muting each block in turn under algorithm 16, which has a
@@ -2363,6 +2452,7 @@ static uint32_t putval(char *s, uint32_t i, const param_t *p, uint32_t v)
     case K_DET:  s[i++] = v < 7u ? '-' : '+'; return putn(s, i, v < 7u ? 7u - v : v - 7u, 1);
     case K_MODE: return put(s, i, v ? "FIXED" : "RATIO");
     case K_ONOFF: return put(s, i, v ? "ON" : "OFF");
+    case K_STEREO: return put(s, i, v ? "MONO" : "STEREO");
     case K_CURVE: return put(s, i, CURVE[v & 3u]);
     case K_WAVE: return put(s, i, WAVE[v < 6u ? v : 0]);
     case K_FTYPE: return put(s, i, FTYPE[v & 3u]);
@@ -2414,6 +2504,10 @@ static uint32_t putval(char *s, uint32_t i, const param_t *p, uint32_t v)
     case K_VEL: return putn(s, i, v ? (v * 127u + 49u) / 99u : 1u, 1);
     case K_MCH: return v ? putn(s, i, v, 1) : put(s, i, "ALL");
     case K_BITS: i = putn(s, i, 24u - CRUSH_SH[v < 4u ? v : 3u], 1); return put(s, i, " BIT");
+    case K_SRATE: {
+        static const char *const SR_NAME[SR_N] = {"8K", "11K", "16K", "22K", "32K", "44.1K", "88.2K"};
+        return put(s, i, SR_NAME[v < SR_N ? v : SR_OS]);
+    }
     case K_PLVL: {                              /* 32 of the engine's units are an octave: 3/8 a semitone */
         int32_t t = DX_PITCH[v < 100u ? v : 99u] * 15;   /* tenths of a semitone, times four */
         uint32_t a = (uint32_t)((t < 0 ? -t : t) + 2) / 4u;
@@ -2477,10 +2571,8 @@ static void draw_voice(uint32_t vi, uint32_t y)
     if (saving) {                               /* the slot to write to, and the name to write */
         int32_t x, cw;
         uint32_t k;
-        i = put(s, i, "SAVE U");
-        s[i++] = (char)('0' + (save_slot + 1u) / 10u);   /* zero-padded: the line must not shift
-                                                          * sideways as the slot crosses ten */
-        s[i++] = (char)('0' + (save_slot + 1u) % 10u);
+        i = put(s, i, "SAVE ");
+        i = put_slot(s, i, save_slot);          /* zero-padded: the line must not shift sideways */
         s[i++] = ' ';
         s[i] = 0;
         cw = FONT_S.adv[glyph(&FONT_S, ' ')];   /* the font is fixed width: one cell per character */
@@ -2508,10 +2600,8 @@ static void draw_voice(uint32_t vi, uint32_t y)
     if (vi < DX_NVOICES) {
         s[i++] = ' ';
         i = putn(s, i, vi + 1u, 2);
-    } else {
-        s[i++] = 'U';                           /* one of yours */
-        i = putn(s, i, vi - DX_NVOICES + 1u, 2);
-    }
+    } else
+        i = put_slot(s, i, vi - DX_NVOICES);    /* one of yours */
     s[i++] = ' ';
     voice_name(vi, nm);
     i = put(s, i, nm);
@@ -3989,18 +4079,18 @@ static void op_solo(uint32_t op)
 /* A/B. The switch swaps the two patches outright, so every page keeps reading `edit` and nothing
  * else in the file has to know the compare exists. The voice number and the edited mark travel
  * with the patch, or the name under the diagram would belong to the other side. */
-static void ab_swap(uint8_t *voice)
+static void ab_swap(uint16_t *voice)
 {
     uint32_t i;
     uint8_t t;
     for (i = 0; i < DX_VSZ; i++) { t = edit[i]; edit[i] = other[i]; other[i] = t; }
     t = modified;   modified = other_mod;   other_mod = t;
-    t = *voice;     *voice = other_voice;   other_voice = t;
+    { uint16_t w = *voice; *voice = other_voice; other_voice = w; }
     ab ^= 1u;
     patch_publish();
 }
 
-static void ab_copy(uint8_t voice)              /* this side onto the other: a place to come back to */
+static void ab_copy(uint16_t voice)             /* this side onto the other: a place to come back to */
 {
     memcpy(other, edit, DX_VSZ);
     other_mod = modified;
@@ -4013,7 +4103,8 @@ static void ab_copy(uint8_t voice)              /* this side onto the other: a p
  * how anyone learns this. The FM-1 speaks the DX7's own dump format, so a .syx file off the net
  * goes straight in and a voice you built here comes straight back out.
  *
- *   F0 43 0n 09 20 00 <4096> sum F7   32 voices: the whole bank, written to flash
+ *   F0 43 0n 09 20 00 <4096> sum F7   32 voices: a whole bank, written to flash -- the bank you are
+ *                                     in (the voice's, or on a factory voice the last one saved to)
  *   F0 43 0n 00 01 1B  <155> sum F7   one voice: into the editor, as a DX7 does -- it lands in what
  *                                     you are playing and you choose whether to keep it
  *   F0 43 2n 09 F7 / F0 43 2n 00 F7   the host asking for either of those back
@@ -4023,17 +4114,31 @@ static void ab_copy(uint8_t voice)              /* this side onto the other: a p
  *
  * This runs in the main loop, from platform_poll, so a bank write stops the sound for the ~100 ms
  * of the two erases. That is the only time FM Lab deliberately interrupts itself. */
+static uint8_t sx_bank;                         /* the bank you are in: the voice's, or the last saved to */
+
+static void say_bank(uint32_t b, const char *what)   /* "BANK 2 RECEIVED" */
+{
+    static char m[24];
+    uint32_t i = put(m, 0, "BANK ");
+    m[i++] = (char)('1' + b);
+    m[i++] = ' ';
+    i = put(m, i, what);
+    m[i] = 0;
+    say(m);
+}
+
 static int app_sysex(const uint8_t *p, uint32_t n)
 {
     uint8_t u[DX_VSZ];
-    uint32_t sub;
+    uint32_t sub, b = sx_bank;
     if (n < 3u || p[0] != 0x43u)
         return 0;                               /* not Yamaha's: let the updater look at it */
     sub = p[1] >> 4;
     if (sub == 2u && n == 3u) {                 /* a request for a dump */
         if (p[2] == 0x09u) {
-            bankv[NUSER * 128u] = dx_syx_sum(bankv, NUSER * 128u);
-            say(sysex_send(bankmsg, sizeof bankmsg) ? "BANK SEND FAILED" : "BANK SENT");
+            memcpy(bankmsg + 6, bankv + b * BANK_V * 128u, BANK_V * 128u);
+            bankmsg[6u + BANK_V * 128u] = dx_syx_sum(bankmsg + 6, BANK_V * 128u);
+            say_bank(b, sysex_send(bankmsg, sizeof bankmsg) ? "SEND FAILED" : "SENT");
         } else if (p[2] == 0x00u) {
             uint8_t m[163];
             m[0] = 0xF0; m[1] = 0x43; m[2] = 0x00; m[3] = 0x00; m[4] = 0x01; m[5] = 0x1B;
@@ -4047,12 +4152,12 @@ static int app_sysex(const uint8_t *p, uint32_t n)
     }
     if (sub != 0u || n < 5u)
         return 0;
-    if (p[2] == 0x09u && p[3] == 0x20u && p[4] == 0x00u && n == 5u + NUSER * 128u + 1u) {
-        if (dx_syx_sum(p + 5, NUSER * 128u) != p[n - 1u])
+    if (p[2] == 0x09u && p[3] == 0x20u && p[4] == 0x00u && n == 5u + BANK_V * 128u + 1u) {
+        if (dx_syx_sum(p + 5, BANK_V * 128u) != p[n - 1u])
             say("BANK BAD CHECKSUM");
         else {
-            memcpy(bankv, p + 5, NUSER * 128u);
-            say(bank_write(bankv, NUSER * 128u) ? "BANK WRITE FAILED" : "BANK RECEIVED");
+            memcpy(bankv + b * BANK_V * 128u, p + 5, BANK_V * 128u);
+            say_bank(b, bank_put(b) ? "WRITE FAILED" : "RECEIVED");
         }
         return 1;
     }
@@ -4385,7 +4490,13 @@ static void st_len(int32_t d)                   /* LENGTH, of every note on the 
 typedef struct { int8_t oct; uint8_t voice; uint8_t slot; uint8_t mono; uint8_t span; uint8_t rsv;
                  uint8_t genv[G_N]; uint8_t flt[3]; uint8_t fx[4 * FX_N]; uint8_t goff;
                  uint8_t pmark; uint8_t play[PL_N]; uint8_t sq_n; sqn_t sq[SQ_MAX];
-                 uint8_t play2[PL2_N]; uint8_t poff; uint8_t mch; uint8_t pch; uint8_t os; uint8_t bits; } settings_t;
+                 uint8_t play2[PL2_N]; uint8_t poff; uint8_t mch; uint8_t pch; uint8_t os; uint8_t bits;
+                 uint8_t omono;
+                 uint8_t voice_hi;              /* the voice is voice + 256 voice_hi: there are 276 */
+                 uint8_t srate;                 /* SR_OS less the step, so 0, the default, is 88.2K. `os`
+                                                 * is still written, for whether that is 88.2K: a store
+                                                 * from before has only that, and its OFF was 44.1K */
+               } settings_t;
 typedef char fmlab_settings_255[(sizeof(settings_t) <= 255u) ? 1 : -1];   /* the host keeps a byte of length */
 #define PL_MARK 0xA5u                           /* the play block is this one: an earlier layout is ignored */
 
@@ -4404,8 +4515,10 @@ static void set_take(settings_t *set)
     set->poff = ui[UI_POFF];
     set->mch = ui[UI_MCH];
     set->pch = ui[UI_PCH];
-    set->os = ui[UI_OS];
+    set->os = ui[UI_SRATE] == SR_OS;
+    set->srate = (uint8_t)(SR_OS - ui[UI_SRATE]);
     set->bits = 3u - ui[UI_BITS];               /* saved the other way up: 0, the default, is 24 */
+    set->omono = ui[UI_OUT];
     set->pmark = PL_MARK;
     for (k = 0; k < PL_N; k++)
         set->play[k] = ui[UI_TEMPO + k];
@@ -4424,11 +4537,13 @@ static void set_take(settings_t *set)
 static void app_main(void)
 {
     settings_t set = {0, 0, 0, 0, 2, 0, {0, 50, 99, 99}, {60, 0, 0}, {FX_DEFAULTS}, 1,
-                      PL_MARK, {PLAY_DEFAULTS}, 0, {{0, 0, 0}}, {PLAY2_DEFAULTS}, 0, 0, 1, 1, 0};
+                      PL_MARK, {PLAY_DEFAULTS}, 0, {{0, 0, 0}}, {PLAY2_DEFAULTS}, 0, 0, 1, 1, 0, 0, 0, 0};
     uint32_t prev = 0, k, t_change = 0, dirty = 0, t_meter = 0, repaint = 1, repaint_meter = 1;
     uint32_t sounding = 0;                      /* keys that really started a note: a page change must not strand one */
     uint32_t t_live = 0, eg_dirty = 1, eg_live = 0;
-    uint32_t nv_drawn = ~0u, cpu_drawn = ~0u, pk_drawn = ~0u, vkey_drawn = ~0u;
+    uint32_t nv_drawn = ~0u, cpu_drawn = ~0u, pk_drawn = ~0u;
+    uint64_t vkey_drawn = ~0ull;
+    uint16_t voice;                             /* where in the voice list: factory, then U1-01 .. U8-32 */
     int32_t oct_drawn = 99;
     uint8_t held[27] = {0};
     uint16_t shown[4] = {0xFFFFu, 0xFFFFu, 0xFFFFu, 0xFFFFu};
@@ -4446,9 +4561,9 @@ static void app_main(void)
 
     bank_init();                                /* before the first load_voice: a slot may be the voice */
     settings_load(&set, sizeof set);
+    voice = (uint16_t)(set.voice + 256u * set.voice_hi);
     if (set.oct < -2 || set.oct > 2) set.oct = 0;
-    if (set.voice >= NVOICE) set.voice = 0;
-    if (set.slot >= NUSER) set.slot = 0;
+    if (voice >= NVOICE) voice = 0;
     if (set.span >= SP_NSPAN) set.span = 2;
     spspan = set.span;
     ui[UI_SPAN] = spspan;
@@ -4463,10 +4578,15 @@ static void app_main(void)
     ui[UI_POFF] = set.poff ? 1u : 0u;
     ui[UI_MCH] = set.mch > 16u ? 0u : set.mch;
     ui[UI_PCH] = set.pch ? 1u : 0u;
-    ui[UI_OS] = set.os ? 1u : 0u;
-    os_want = ui[UI_OS];
+    ui[UI_SRATE] = set.srate > SR_OS ? SR_OS : SR_OS - set.srate;
+    if (ui[UI_SRATE] == SR_OS && !set.os)      /* OVERSAMPLE OFF, from before there were steps */
+        ui[UI_SRATE] = SR_OS - 1u;
+    os_want = ui[UI_SRATE] == SR_OS;
+    sr_hz = SR_HZ[ui[UI_SRATE]];
     ui[UI_BITS] = set.bits > 3u ? 3u : 3u - set.bits;
     crush_sh = CRUSH_SH[ui[UI_BITS]];
+    ui[UI_OUT] = set.omono ? 1u : 0u;
+    out_mono = ui[UI_OUT];
     if (set.pmark == PL_MARK) {
         static const uint8_t PMAX[PL_N] = {99, 4, 3, 1, 2, 2, 1};
         static const uint8_t PMAX2[PL2_N] = {99, 5, 25, 99};
@@ -4491,8 +4611,8 @@ static void app_main(void)
     set.mono = set.mono ? 1u : 0u;
     ev_push(EV_MONO, set.mono, 0);              /* the ISR owns the mode: tell it what was stored */
     save_slot = set.slot;
-    load_voice(set.voice);
-    ab_copy(set.voice);                         /* both sides start as the same sound */
+    load_voice(voice);
+    ab_copy(voice);                         /* both sides start as the same sound */
     memcpy(pbuf[pcur ^ 1u], edit, DX_VSZ);         /* both halves valid before the ISR ever reads one */
 
     lcd_fill(0, 0, 240, 240, C_BLACK);
@@ -4502,13 +4622,16 @@ static void app_main(void)
         uint32_t base = (uint32_t)(KEY0 + 12 * set.oct);
         int32_t enc;
         uint8_t st, d1, d2;
-        platform_poll();
+        sx_bank = (uint8_t)(voice >= DX_NVOICES ? (voice - DX_NVOICES) / BANK_V : set.slot / BANK_V);
+        platform_poll();                    /* (a bank arriving in there goes into sx_bank) */
         glo_sync();                         /* whatever moved the four bytes, the ISR has them */
         flt_sync();                         /* ..and the filter's three, if they moved */
         fx_sync();                          /* ..and the effects' sixteen */
         pl_sync();                          /* ..and what the clock plays */
-        os_want = ui[UI_OS];                /* ..and whether it renders at twice the rate */
+        os_want = ui[UI_SRATE] == SR_OS;    /* ..and the rate it renders at */
+        sr_hz = SR_HZ[ui[UI_SRATE] < SR_N ? ui[UI_SRATE] : SR_OS];
         crush_sh = CRUSH_SH[ui[UI_BITS] & 3u];   /* ..and at how many bits */
+        out_mono = ui[UI_OUT];              /* ..and to one channel or two */
 
         keys = fm1_in.notes;                    /* bit k: key k (0 = F3 .. 26 = G5) */
         down = keys & ~prev;
@@ -4570,7 +4693,7 @@ static void app_main(void)
             }
             if ((up >> k & 1u) && k == AB_KEY && ab_t) {
                 if (!ab_long) {                 /* a tap: the other side */
-                    ab_swap(&set.voice);
+                    ab_swap(&voice);
                     dirty = 1;
                     t_change = fm1_ms;
                 }
@@ -4592,13 +4715,14 @@ static void app_main(void)
 
         if (ab_t && !ab_long && (keys >> AB_KEY & 1u) && fm1_ms - ab_t >= LONG_MS) {
             ab_long = 1;                        /* a hold: this side onto the other */
-            ab_copy(set.voice);
+            ab_copy(voice);
             say(ab ? "B COPIED TO A" : "A COPIED TO B");
         }
 
         b = fm1_input_edges(&rel);
-        if (b && !(b & (1u << BTN_SAVE)))
-            saving = 0;                                    /* anything else backs out of the save */
+        if (b && !(b & (1u << BTN_SAVE)) && b != 1u << BTN_SEL)
+            saving = 0;                                    /* anything else backs out of the save --
+                                                            * but SEL, the shift for PRESETS' banks */
         if (b & (1u << BTN_OCT_DOWN) && set.oct > -2) { set.oct--; dirty = 1; t_change = fm1_ms; }
         if (b & (1u << BTN_OCT_UP) && set.oct < 2) { set.oct++; dirty = 1; t_change = fm1_ms; }
         /* A page button moves to its page; pressing it again walks that page's banks of parameters,
@@ -4681,7 +4805,7 @@ static void app_main(void)
          * turned under it has spoken for the press -- so a hold cannot fire on the clock the way
          * the page buttons' do, or every fine adjustment would end in a solo. */
         if (b & (1u << BTN_SEL)) {
-            sel_used = 0;
+            sel_used = saving;                             /* while saving it is only the shift */
             t_sel = fm1_ms;
             draw_legend();                                 /* the names go bright: a click is one */
         }
@@ -4800,7 +4924,7 @@ static void app_main(void)
                 saving = 0;
                 memcpy(edit + 145, save_name, 10);     /* the name goes in with the sound */
                 if (bank_store(save_slot, edit) == 0) {
-                    set.voice = (uint8_t)(DX_NVOICES + save_slot);
+                    voice = (uint16_t)(DX_NVOICES + save_slot);
                     set.slot = save_slot;
                     modified = 0;                          /* the slot now holds exactly this */
                     say("SAVED");
@@ -4812,17 +4936,19 @@ static void app_main(void)
         }
 
         if ((enc = fm1_enc_take(ENC_PRESETS)) != 0) {      /* the voice, or the slot to save to */
+            if (sel_fine())                                /* SEL held: a bank at a time */
+                sel_used = 1;
             if (saving) {
-                int32_t s2 = (int32_t)save_slot + enc;
+                int32_t s2 = sel_fine() ? (int32_t)bank_jump(save_slot, enc, 0) : (int32_t)save_slot + enc;
                 while (s2 < 0) s2 += (int32_t)NUSER;
                 save_slot = (uint8_t)(s2 % (int32_t)NUSER);
             } else {
-                int32_t vi = (int32_t)set.voice + enc;
+                int32_t vi = sel_fine() ? (int32_t)bank_jump(voice, enc, 1) : (int32_t)voice + enc;
                 while (vi < 0) vi += NVOICE;
-                set.voice = (uint8_t)(vi % NVOICE);
-                load_voice(set.voice);
+                voice = (uint16_t)(vi % NVOICE);
+                load_voice(voice);
                 if (ui[UI_PCH])                 /* so whatever is listening can follow */
-                    midi_send(0xC0u | MIDI_TX, set.voice, 0);
+                    pc_send(voice);
                 dirty = 1;
                 t_change = fm1_ms;
             }
@@ -4976,9 +5102,13 @@ static void app_main(void)
             if ((st & 0xF0u) == 0x90u && d2) { sp_note = d1; ev_push(EV_ON, d1, d2); }
             else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) ev_push(EV_OFF, d1, 0);
             else if ((st & 0xF0u) == 0xB0u && d1 == 123u) ev_push(EV_PANIC, 0, 0);
-            else if ((st & 0xF0u) == 0xC0u && ui[UI_PCH] && !saving && d1 < NVOICE) {
-                set.voice = d1;                 /* program N: the voice list's N+1 */
-                load_voice(set.voice);
+            else if ((st & 0xF0u) == 0xB0u && d1 == 0u) pc_bank = d2;   /* bank select, for the next PC */
+            else if ((st & 0xF0u) == 0xC0u && ui[UI_PCH] && !saving &&
+                     (pc_bank >= 1u && pc_bank <= NBANK ? d1 < BANK_V : 1)) {   /* 0..127 are all in the list */
+                /* bank 0 (or none): program N is the voice list's N+1; bank 1..8: slot N+1 of U1..U8 */
+                voice = (uint16_t)(pc_bank >= 1u && pc_bank <= NBANK ?
+                                      DX_NVOICES + (pc_bank - 1u) * BANK_V + d1 : d1);
+                load_voice(voice);
                 dirty = 1;
                 t_change = fm1_ms;
                 repaint = 1;
@@ -5110,13 +5240,13 @@ static void app_main(void)
             eg_dirty = 1;
         }
         {                                       /* the voice line: the name, or what it is asking / saying */
-            uint32_t vkey = (uint32_t)set.voice | (uint32_t)modified << 8 | (uint32_t)ab << 9 |
-                            (uint32_t)saving << 10 | (uint32_t)save_slot << 11 |
-                            (flash_msg ? 1u << 17 : 0u) | (msg_gen & 7u) << 18 |
-                            (uint32_t)save_cur << 21 | (uint32_t)name_sum() << 25;
+            uint64_t vkey = (uint64_t)voice | (uint64_t)modified << 9 | (uint64_t)ab << 10 |
+                            (uint64_t)saving << 11 | (uint64_t)save_slot << 12 |
+                            (flash_msg ? 1ull << 20 : 0u) | (uint64_t)(msg_gen & 7u) << 21 |
+                            (uint64_t)save_cur << 24 | (uint64_t)name_sum() << 28;
             if (vkey != vkey_drawn || repaint) {
                 vkey_drawn = vkey;
-                draw_voice(set.voice, page == PAGE_HOME ? 44u : 188u);
+                draw_voice(voice, page == PAGE_HOME ? 44u : 188u);
                 if (page != PAGE_HOME) { bank_drawn = 255; }   /* the header may name a changed algorithm */
             }
         }
@@ -5239,6 +5369,8 @@ static void app_main(void)
         if (dirty && !v_lit && !seq_run && !(arp_on && chord_n) && fm1_ms - t_change > 2000u) {
             /* an erase stalls the sound: save when silent, and not in the gaps of a loop, which the
              * stall would put out of time */
+            set.voice = (uint8_t)voice;
+            set.voice_hi = (uint8_t)(voice >> 8);
             settings_save(&set, sizeof set);
             dirty = 0;
         }

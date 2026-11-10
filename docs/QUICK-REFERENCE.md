@@ -8,7 +8,7 @@ always names the four knobs.
 
 | Knob | Does |
 | --- | --- |
-| **PRESETS** | The voice: 20 factory voices, then user slots `U01`–`U32`. Changes under held notes. While saving: the slot. |
+| **PRESETS** | The voice: 20 factory voices, then user slots `U1-01`–`U8-32`. **SEL** held: a bank at a time. Changes under held notes. While saving: the slot. |
 | **SELECT** | The next four things under the knobs, either way round — a page's next bank, HOME's next knob set, the next operator after a tap. While saving: which letter. On the step view: the step. |
 | **ALGORITHM** | The algorithm, 1–32, from any page. While saving: the letter itself. |
 | **Knobs 1–4** | Whatever the bottom strip says. A 0–99 value moves **5** a click. |
@@ -29,7 +29,7 @@ always names the four knobs.
 | **SEQ** | The looper's knobs on HOME | The step view |
 | **REC** | Stopped: a bar count-in, then record one loop. Playing: overdub one loop. | Clear the phrase |
 | **PLAY** | Play / stop the phrase | — |
-| **SAVE** | Start saving: the slot on **PRESETS**, the name on **SELECT** + **ALGORITHM**. Again: write it. Anything else backs out. | — |
+| **SAVE** | Start saving: the slot on **PRESETS**, the name on **SELECT** + **ALGORITHM**. Again: write it. Anything else but **SEL** backs out. | — |
 | **OCT-** / **OCT+** | Two octaves either way. Lit for a shift, pulses at the end. Hold **OCT-** while switching on: USB rescue. | — |
 
 **SEL** acts on release, and only where there is a selected operator (a page, or a tap of EDIT/ENV/LFO). A press
@@ -68,7 +68,7 @@ A tap of **EDIT**, **ENV**, **LFO**, **FX**, **ARP** or **SEQ** borrows the knob
 | OPERATOR | `LEVEL RATIO DETUNE WAVE` · `MODE COARSE FINE V SENS` · `AMSENS RT SCL BRK PT L DEP` · `R DEP L CRV R CRV` |
 | ENVELOPE | `ATTACK DECAY SUSTAIN RELEASE` · then the four segments, a rate and its level each. On `PITCH`: the pitch envelope's four. |
 | LFO | `SPEED DELAY WAVE` · `P MOD A MOD PMSENS` · `K SYNC` |
-| GLOBAL | `ALGO FEEDBK O SYNC TRANSP` · the pitch envelope's rates · its levels · `MIDICH PRG CH OVERSM BITS`. The CPU meter is the bottom line; the firmware version is top right. |
+| GLOBAL | `ALGO FEEDBK O SYNC TRANSP` · the pitch envelope's rates · its levels · `MIDICH PRG CH S RATE BITS` · `OUTPUT` (stereo / mono). The CPU meter is the bottom line; the firmware version is top right. |
 | EFFECTS | `CHORUS` · `PHASER` · `DELAY` · `REVERB`, each `MIX` first; `MIX 0` is off |
 | ARP (tap) | `TEMPO PATTERN OCTAVE LATCH` · `GATE RATE SWING VELO` |
 | SEQ (tap) | `TEMPO BARS DIV CLICK` |
@@ -79,5 +79,5 @@ A tap of **EDIT**, **ENV**, **LFO**, **FX**, **ARP** or **SEQ** borrows the knob
 | | Kept |
 | --- | --- |
 | **In the voice** (DX7 data; `*` while edited) | Everything on OPERATOR, ENVELOPE, LFO and GLOBAL's first three banks, the pitch envelope, operator waves. **SAVE** to a user slot; turn **PRESETS** off and back to throw an edit away. |
-| **With the instrument** (saved by itself) | Octave, mono/poly, the global envelope and its switch, the pitch envelope's switch, filter, effects, spectrum span, MIDI channel, program change, oversampling and bit depth, arp and looper settings, the phrase. |
+| **With the instrument** (saved by itself) | Octave, mono/poly, the global envelope and its switch, the pitch envelope's switch, filter, effects, spectrum span, MIDI channel, program change, sample rate and bit depth, stereo / mono output, arp and looper settings, the phrase. |
 | **Not kept** | The operator switches and solo — changing voice brings all six back. |

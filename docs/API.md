@@ -199,12 +199,13 @@ drops out. `fmlab.c` saves 2 s after the last change, once all voices are silent
 The build prints what you use and fails above the limits.
 
 Flash (1 MiB) as FM Lab uses it: the app, the update staging area (0xE0000, the platform's), the settings
-sector (0xFC000) and the voice bank (0xFD000 and 0xFE000, via `bank_read`/`bank_write` — 4096 packed bytes
-with a length-and-CRC header, too big for one sector). The other firmwares of the family keep their data in
-0x97000..0xFBFFF, which FM Lab deliberately leaves alone, so the stock firmware put back over it still finds
-its samples. A new firmware simply finds its own magic missing and starts fresh. To store more, widen
-`FL_RANGE_OK` in platform.c to the range you pick: it is the guard that keeps a bug from erasing anything
-else.
+sector (0xFC000) and eight voice banks (0xFD000 for bank 0, then 0xF6000, 0xF8000 and 0xFA000, then
+0xEE000, 0xF0000, 0xF2000 and 0xF4000, two sectors each, via `bank_read(b, p, n)`/`bank_write(b, p, n)` — 4096 packed bytes with a length-and-CRC header, too
+big for one sector). The other firmwares of the family keep their data in 0x97000..0xFBFFF; FM Lab leaves
+all of it below 0xEE000 alone, and the stock firmware's main store ends at 0xE0000, so putting it back
+still finds its samples. A new firmware simply finds its own magic missing and starts fresh. To store more,
+widen `FL_RANGE_OK` in platform.c to the range you pick: it is the guard that keeps a bug from erasing
+anything else.
 
 ## Build options
 

@@ -1,0 +1,45 @@
+# FM Lab -- srate: SAMPLE RATE, heard. The same note at each of its seven steps, from 88.2K down to
+# 8K; tests/sratecheck.py checks that under 44.1K the voices are held for as long as the rate says
+# (at 22K every other sample is the one before it again), and that the note keeps its level.
+#
+#   build/host/fmlab build/host/srate tests/srate.txt
+
+# GLOBAL's fourth bank, where SAMPLE RATE is the third knob.
+200 btn 7
+400 btn 7
+600 btn 7
+800 btn 7
+1000 shot
+
+# 88.2K (as it starts)
+1200 midi 0x90 69 100
+2200 midi 0x80 69 0
+# 44.1K
+2600 enc 4 -1
+2800 midi 0x90 69 100
+3800 midi 0x80 69 0
+# 32K
+4200 enc 4 -1
+4400 midi 0x90 69 100
+5400 midi 0x80 69 0
+# 22K
+5800 enc 4 -1
+6000 midi 0x90 69 100
+7000 midi 0x80 69 0
+# 16K
+7400 enc 4 -1
+7600 midi 0x90 69 100
+8600 midi 0x80 69 0
+# 11K
+9000 enc 4 -1
+9200 midi 0x90 69 100
+10200 midi 0x80 69 0
+# 8K
+10600 enc 4 -1
+10700 shot
+10800 midi 0x90 69 100
+11800 midi 0x80 69 0
+# and no further than 8K
+12200 enc 4 -1
+12400 shot
+12600 end

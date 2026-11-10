@@ -4,6 +4,24 @@ FM Lab's releases, newest first. Each one is on the
 [releases page](https://github.com/jsmith13/fm_lab/releases) with its `.fwsc`; the version a build is shows in
 GLOBAL's top-right corner. Versions are `MAJOR.MINOR.PATCH`: a patch fixes what was there, a minor adds to it.
 
+## Unreleased
+
+### Added
+- **256 user slots**, as eight banks of 32: `U1-01` to `U8-32`. Bank `U1` is where it was, so the voices
+  you have already saved are still there. Hold **SEL** while turning **PRESETS** to jump a bank at a time,
+  in the voice list and while picking a slot to save to.
+- Bank Select (CC 0) with program change: bank 1–8 and program *N* is slot *N*+1 of `U1`–`U8`; bank 0,
+  or none, is the voice list as before. **PRESETS** sends the bank before the program.
+- A bulk dump in goes into the bank you are in, and a bank request sends that bank back; the screen
+  says which (`BANK 2 RECEIVED`).
+- **OUTPUT** (GLOBAL, fifth bank): `STEREO`, or `MONO` for a mono 3.5 mm plug, with left and right summed
+  onto both sides so nothing the effects put on the right is lost.
+
+### Changed
+- **OVERSAMPLE is now SAMPLE RATE** (GLOBAL, fourth bank): `88.2K` (oversampled, as `ON` was, and where it
+  starts), `44.1K` (as `OFF` was), then `32K`, `22K`, `16K`, `11K` and `8K`, which hold the voices at that
+  rate, aliasing and all, for the sound of older hardware. A saved `OFF` comes back as `44.1K`.
+
 ## 1.1.0 — 2026-10-18
 
 ### Added

@@ -45,16 +45,16 @@ sounds like, how an algorithm with four carriers differs from one with one. They
 for dxsloop and carried over unchanged; none of them are Yamaha's or M-VAVE's. They are written out in
 `tools/gen_voices.py`, which is the readable source for all of them.
 
-**32 user slots** after them, in flash, for your own sounds and for other people's — a DX7 bank is 32 voices,
-so a bank fills them exactly.
+**256 user slots** after them, in flash, for your own sounds and for other people's: eight banks of 32,
+`U1` to `U8`, because a DX7 bank is 32 voices and so a bank sent in fills one exactly.
 
 ## Playing it
 
 | | |
 | --- | --- |
 | **The keys** | 27 of them, F3 to G5. **OCT-** / **OCT+** move it two octaves either way; the button lights for a shift that way and pulses once you are at the end of the travel. A key stops the note it started, so changing octave mid-chord does the right thing. |
-| **PRESETS** | The voice. It changes under anything still sounding, so you can hold a chord and walk through the bank. 20 factory voices, then your 32, numbered `U01` to `U32`. |
-| **SAVE** | Keep the sound you are on, under a name of your own. Press, name it and pick the slot, press again. Any other button backs out. |
+| **PRESETS** | The voice. It changes under anything still sounding, so you can hold a chord and walk through the bank. 20 factory voices, then your 256, numbered `U1-01` to `U8-32`. Hold **SEL** while turning it to jump a bank at a time. |
+| **SAVE** | Keep the sound you are on, under a name of your own. Press, name it and pick the slot, press again. Any other button but **SEL** backs out. |
 | **HOME** | Three screens, and pressing it again steps through them: the algorithm drawn out, the spectrum of what you are hearing, or its waveform. |
 | **MONO / POLY** | The top two black keys, on the OPERATOR page. Mono is one voice, last note wins. |
 | **A / B** | The voice line starts with the side you are listening to. The top black key, **F#5**, flips it on a tap and copies this side onto the other on a hold — wherever you are editing; on plain HOME it is just a key. |
@@ -121,7 +121,7 @@ the title says what moved instead — `OP1 LVL 69`, or `OP3 x2.00` — for a sec
 | **EDIT** | OPERATOR | hold for the page: level, ratio, detune and wave, then mode, the coarse and fine bytes and velocity sensitivity, then amp mod and the keyboard scaling — or tap it to put `LEVEL RATIO DETUNE WAVE` under the knobs without leaving HOME |
 | **ENV** | ENVELOPE | hold for the page: the envelope drawn to scale, attack, decay, sustain and release, then the four raw segments a rate and level at a time — or tap it for `ATK DEC SUS REL` without leaving HOME |
 | **LFO** | LFO | hold for the page: the LFO drawn over speed, delay and wave, then pitch mod, amp mod and pitch mod sensitivity, then key sync — or tap it for this operator's `A M SENS` without leaving HOME |
-| **GLO** | GLOBAL | algorithm, feedback, oscillator key sync, transpose and the pitch envelope; then MIDI: the channel it listens and sends on, and program change |
+| **GLO** | GLOBAL | algorithm, feedback, oscillator key sync, transpose and the pitch envelope; then MIDI: the channel it listens and sends on, and program change; sample rate, bit depth, and stereo or mono out |
 | **FX** | EFFECTS | hold for the page: chorus, phaser, delay and reverb, a bank each — or tap it for the four effects' `MIX` without leaving HOME |
 
 ### Ratio, and the two bytes under it
@@ -261,25 +261,38 @@ The last bank of GLOBAL is how the instrument talks MIDI, and like the global en
 the instrument rather than the voice, so it is saved with the octave. `MIDI CHANNEL` starts at `ALL`,
 which listens to every channel; set it to a number and only that channel is heard, and the keys send on
 it too. `PROG CHANGE` `ON` makes program *N* load voice *N*+1 of the list that **PRESETS** turns
-through — the factory voices first, then the user slots — and turning **PRESETS** sends one the other
-way, so a DAW can follow along. `OFF` does neither.
+through — the factory voices first, then the user slots. To reach any of the 256 slots, send Bank Select
+(CC 0) first: bank 1 to 8 and program *N* is slot *N*+1 of `U1` to `U8`, and bank 0 goes back to the plain
+list. Turning **PRESETS** sends the same pair the other way — bank 0 and the voice for a factory voice,
+the bank and the slot for one of yours — so a DAW can follow along. `OFF` does neither.
 
 MIDI comes in two ways, and both are heard the same: over USB, and on the 3.5 mm **MIDI IN** jack, from a
 keyboard or pad controller through a TRS-to-DIN adapter. TRS MIDI adapters come in two wirings, type A
 and type B; if a keyboard on the jack plays nothing, the adapter is the first thing to swap. The jack
 takes notes and program changes; SysEx and anything going out are USB only.
 
-### Oversampling
+### Sample rate
 
-The third knob of that last bank, `OVERSAMPLE`, starts `ON`. FM makes harmonics far above what 44.1 kHz
-can hold, and those above 22 kHz don't vanish: they fold back down as tones that don't belong to the note,
-the metallic grit of a bright patch played high. With it `ON` the operators run at twice the rate and a
-filter removes what lies above 20 kHz before the sound comes back down, so a bright note high up keeps
-about 40 dB less of that than with it `OFF`. Mellow patches and low notes sound the same either way.
+The third knob of that last bank, `SAMPLE RATE`, picks the rate the voices are made at: `88.2K`, where it
+starts, then `44.1K`, `32K`, `22K`, `16K`, `11K` and `8K`.
 
-It costs CPU. With all eight voices, the filter and every effect running, the meter reads about 72 %,
-peaking at 82 %, with it `ON`; `OFF` gives back roughly half the engine's share. If you're running short
-(above 85 % the instrument drops a voice), switch it `OFF`. It's saved with the instrument, not the voice.
+`88.2K` is oversampling. FM makes harmonics far above what 44.1 kHz can hold, and those above 22 kHz don't
+vanish: they fold back down as tones that don't belong to the note, the metallic grit of a bright patch
+played high. At `88.2K` the operators run at twice the rate and a filter removes what lies above 20 kHz
+before the sound comes back down, so a bright note high up keeps about 40 dB less of that than at `44.1K`,
+which is how Dexed and FM Lab before 1.1 sound. Mellow patches and low notes sound the same either way.
+
+Below that, the voices are held at the slower rate, each value kept until the slower clock ticks again,
+with nothing to stop what lies above half the rate first. That fold-back is the point: it is the grainy,
+ringing top of older hardware. `32K` is the first digital keyboards and broadcast, `22K` and `11K` the early
+computers and sound cards, `8K` the telephone. Like `BIT DEPTH`, it is the voices only; the filter and the
+effects after them stay at full rate. The two together make the old machines: `11K` and `8 BIT` is a
+'80s home computer.
+
+`88.2K` costs CPU. With all eight voices, the filter and every effect running, the meter reads about 72 %,
+peaking at 82 %; every other step gives back roughly half the engine's share. If you're running short
+(above 85 % the instrument drops a voice), step down to `44.1K`. It's saved with the instrument, not the
+voice.
 
 ### Bit depth
 
@@ -293,6 +306,14 @@ The steps are measured against full scale, as an old DAC's were, and a single no
 soft note at `8 BIT` is made of a couple of dozen levels: gritty and buzzy, and its quiet tail breaks up and
 then cuts to silence before it would have faded out. Play harder, or play chords, and more of the bits get
 used. It costs no CPU, and is saved with the instrument, not the voice.
+
+### Mono output
+
+GLOBAL's fifth bank has one knob, `OUTPUT`, which starts at `STEREO`. A mono 3.5 mm plug only picks up the
+left channel, so anything the chorus, phaser or reverb puts on the right would be lost. `MONO` sums left
+and right and sends the result to both, halved so a centred sound keeps its level. A wide chorus comes out
+a little quieter in mono, because its two sides partly cancel when added. It is the very last step before
+the jack, and is saved with the instrument.
 
 ### The pitch envelope
 
@@ -598,14 +619,15 @@ starting again.
 
 ## Keeping a sound
 
-**SAVE** writes the voice you are on into one of the 32 user slots, under a name of your own. Press it and
-the top line turns into `SAVE U01 BRASS`: the slot on the left, the ten characters of the name on the right,
+**SAVE** writes the voice you are on into one of the 256 user slots, under a name of your own. Press it and
+the top line turns into `SAVE U1-01 BRASS`: the slot on the left, the ten characters of the name on the right,
 one of them ruled underneath. Three knobs are live at once, so picking the slot and writing the name are the
-same moment rather than two steps — **PRESETS** moves the slot, **SELECT** moves along the name, and
-**ALGORITHM** sets the character you are on. Press **SAVE** again to write; press anything else to back out,
-and the name you were typing goes with it.
+same moment rather than two steps — **PRESETS** moves the slot (with **SEL** held, a bank at a time),
+**SELECT** moves along the name, and
+**ALGORITHM** sets the character you are on. Press **SAVE** again to write; press anything else but **SEL**
+to back out, and the name you were typing goes with it.
 
-<p align="center"><img src="docs/save.png" width="240" alt="FM Lab asking SAVE U01 BRASS, one letter ruled underneath, with the algorithm still drawn below it"></p>
+<p align="center"><img src="docs/save.png" width="240" alt="FM Lab asking SAVE U1-01 BRASS, one letter ruled underneath, with the algorithm still drawn below it"></p>
 
 The slot number is grey while the slot is still empty and accented once it holds something of yours, so the
 one thing you cannot undo is visible without spending a word on it.
@@ -618,9 +640,11 @@ Space comes first, one detent back from A, which is how you clear the tail of a 
 The screen says `SAVED`, and the write costs about a tenth of a second of silence, because
 programming flash on this chip means stopping the audio.
 
-The bank lives in the last two 4 KiB sectors of the globals area, `0xFD000` and `0xFE000` — not in the main
-store where the stock firmware keeps its samples, so putting the original firmware back finds everything
-where it left it. A slot you have never written holds a DX7 INIT VOICE: a single sine on operator 1,
+Bank `U1` lives in the last two 4 KiB sectors of the globals area, `0xFD000` and `0xFE000`, and `U2` to `U8`
+take two sectors each below it, `0xEE000` to `0xFBFFF`. None of it is in the main store where the stock
+firmware keeps its samples, so putting the original firmware back finds everything where it left it. Each
+bank is written on its own, so saving a slot rewrites only its bank. A slot you have never written holds a
+DX7 INIT VOICE: a single sine on operator 1,
 algorithm 1, which is the right place to start a sound from scratch.
 
 ## Sending it patches
@@ -631,22 +655,24 @@ away, and the fastest way to learn what these 155 numbers do is to open somebody
 ```
 python tools/syx.py list   rhodes.syx     # what the file holds, without sending it
 python tools/syx.py send   rhodes.syx     # file -> FM-1
-python tools/syx.py get bank  mine.syx    # the 32 user slots -> file
+python tools/syx.py get bank  mine.syx    # the bank you are in (32 slots) -> file
 python tools/syx.py get voice one.syx     # the voice on screen -> file
 ```
 
-A **bulk dump** (32 voices, 4104 bytes) replaces all 32 slots at once and the screen says `BANK RECEIVED`. A
+A **bulk dump** (32 voices, 4104 bytes) replaces the 32 slots of the bank you are in — the bank of the voice
+on screen, or, on a factory voice, the bank you last saved to — and the screen says which: `BANK 2
+RECEIVED`. Go to a slot in `U3` first and the dump lands in `U3`; the other three banks are left alone. A
 **single voice dump** lands in the editor with a `*`, unsaved, exactly as it would on a real DX7 — play it,
 and press **SAVE** if you want to keep it. A dump with a bad checksum is refused outright and nothing in
-flash is touched. The FM-1 also answers the two standard dump requests, so any librarian that can talk to a
-DX7 can read its bank back.
+flash is touched. The FM-1 also answers the two standard dump requests, the bank request with the bank you
+are in, so any librarian that can talk to a DX7 can read its banks back one at a time.
 
 One limitation worth knowing: the FM-1 holds **one** SysEx message at a time, so a file written as 32
 back-to-back single-voice dumps — which many bank files found online are — will mostly be dropped. `syx.py`
 paces them and tells you what the file is; a real bulk dump is the thing to send.
 
 If you write your own librarian, note that RtMidi on Windows gives WinMM only 4 × 1024 bytes of SysEx input
-buffer and drops a longer message *with no error at all* — the FM-1 says `BANK SENT` and nothing arrives.
+buffer and drops a longer message *with no error at all* — the FM-1 says `BANK 1 SENT` and nothing arrives.
 `syx.py` talks to WinMM directly on Windows to get a buffer big enough for the 4104-byte bank.
 
 No patches are shipped with FM Lab. The test bank in `tests/mksyx.py` is generated, not borrowed.
@@ -750,8 +776,10 @@ tests/run_host.sh tests/play.txt          # the arpeggiator, the looper and the 
 tests/run_host.sh tests/pitch.txt         # PIT and the pitch envelope: an octave by zero crossings, and its switch
 tests/run_host.sh tests/midi.txt          # the MIDI channel, in and out, and program change both ways
 tests/run_host.sh tests/depth.txt         # a soft note's tail, in the 24 bits the DAC gets (also -24.wav)
-tests/run_host.sh tests/alias.txt         # a bright high note with OVERSAMPLE on and off: what folds back
+tests/run_host.sh tests/alias.txt         # a bright high note at 88.2K and 44.1K: what folds back
+tests/run_host.sh tests/srate.txt         # one note at each SAMPLE RATE: held for as long as the rate says
 tests/run_host.sh tests/bits.txt          # one note at 24, 16, 12 and 8 bits: BIT DEPTH's grid
+tests/run_host.sh tests/mono.txt          # OUTPUT: the chorus wide in stereo, both sides the same in mono
 tests/run_host.sh tests/docshots.txt      # the screenshots in docs/; then python3 tools/docshots.py puts them there
 ```
 

@@ -50,10 +50,14 @@ def main(stem):
     check("a key sends on channel 3", [o[1] for o in keys] == ["92", "82"], str(keys))
     check("program 5 on channel 3 changes the voice", shot(5800) != shot(5200))
     check("program 3 on channel 1 does not", shot(6400) == shot(5800))
-    pcs = [o for o in out if o[1].startswith("C")]
+    pcs = [o for o in out if o[1][0] in "BC"]
     # voice 6 from program 5, one click to 7 unheard, one to 8 sent as program 7 -- had program 9
-    # been taken while OFF, it would say 11
-    check("PRESETS sends a program only with PROG CHG on", pcs == [(8000, "C2", 7, 0)], str(pcs))
+    # been taken while OFF, it would say 11. Then bank 3 program 4 is U3-05, one on is U3-06.
+    check("PRESETS sends a program only with PROG CHG on",
+          pcs[:2] == [(8000, "B2", 0, 0), (8000, "C2", 7, 0)], str(pcs[:2]))
+    check("bank select 3, program 4 is U3-05", pcs[2:] == [(9000, "B2", 0, 3), (9000, "C2", 5, 0)],
+          str(pcs[2:]))
+    check("bank select 0, program 2 changes the voice", shot(9800) != shot(8800))
 
     print(f"\n{bad} checks failed")
     return 1 if bad else 0

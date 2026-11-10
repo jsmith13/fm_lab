@@ -215,22 +215,33 @@ static void host_path(char *out, uint32_t max, const char *suffix)
 {
     snprintf(out, max, "%s%s", host_out, suffix);
 }
-static int bank_read(void *p, uint32_t n)
+static void bank_path(char *out, uint32_t max, uint32_t b)   /* bank 0 is -bank.bin, then -bank2.bin.. */
+{
+    char suf[16];
+    if (b)
+        snprintf(suf, sizeof suf, "-bank%u.bin", b + 1u);
+    else
+        snprintf(suf, sizeof suf, "-bank.bin");
+    host_path(out, max, suf);
+}
+static int bank_read(uint32_t b, void *p, uint32_t n)
 {
     char name[512];
     FILE *f;
     size_t got;
-    host_path(name, sizeof name, "-bank.bin");
+    if (b >= 8u) return -1;
+    bank_path(name, sizeof name, b);
     if (!(f = fopen(name, "rb"))) return -1;
     got = fread(p, 1, n, f);
     fclose(f);
     return got == n ? 0 : -1;
 }
-static int bank_write(const void *p, uint32_t n)
+static int bank_write(uint32_t b, const void *p, uint32_t n)
 {
     char name[512];
     FILE *f;
-    host_path(name, sizeof name, "-bank.bin");
+    if (b >= 8u) return -1;
+    bank_path(name, sizeof name, b);
     if (!(f = fopen(name, "wb"))) { perror(name); return -1; }
     fwrite(p, 1, n, f);
     fclose(f);

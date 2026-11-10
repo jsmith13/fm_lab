@@ -61,9 +61,9 @@ while i < len(raw):
     j = raw.index(0xF7, i)
     frames.append(raw[i + 1:j])
     i = j + 1
-check('two dumps came back', len(frames) == 2, '%d' % len(frames))
-if len(frames) == 2:
-    blk, voc = frames
+check('four dumps came back', len(frames) == 4, '%d' % len(frames))
+if len(frames) == 4:
+    blk, voc = frames[:2]
     check('the bulk dump is a 32-voice dump', len(blk) == 4102 and blk[:5] == b'\x43\x00\x09\x20\x00')
     check('its checksum is right', len(blk) == 4102 and mksyx.checksum(blk[5:4101]) == blk[4101])
     check('it is the bank in flash', blk[5:4101] == bank)
@@ -72,6 +72,36 @@ if len(frames) == 2:
     want = bytearray(mksyx.test_bank()[0])      # TEST 01, as renamed by the naming steps above
     want[145:155] = b'BEST 02   '
     check('it is the voice on screen, renamed', bytes(voc[5:160]) == bytes(want))
+
+# ---- the other banks
+test01 = mksyx.pack(mksyx.test_bank()[0])
+bank2 = open(prefix + '-bank2.bin', 'rb').read()
+check('a bank sent on U2 went into U2', bank2[0:128] == test01 and name_of(bank2[31 * 128:]) == 'TEST 32',
+      name_of(bank2[0:128]))
+bank3 = open(prefix + '-bank3.bin', 'rb').read()
+check('U3-05 is TEST 01, saved from U2-01', bank3[4 * 128:5 * 128] == test01, name_of(bank3[4 * 128:5 * 128]))
+if len(frames) == 4:
+    check('the second bulk dump is U3', bytes(frames[2][5:4101]) == bank3)
+    check('its checksum is right', mksyx.checksum(frames[2][5:4101]) == frames[2][4101])
+
+import re                                           # noqa: E402
+log = open(prefix + '.log', errors='replace').read()
+sent = [(int(m.group(1)), m.group(2), int(m.group(3)), int(m.group(4)))
+        for m in re.finditer(r'^\s*(\d+) ms  MIDI out (B0|C0) (\d+) (\d+)', log, re.M)]
+
+
+def landed(t):
+    """Where PRESETS went at t ms, by what it sent: (bank, program)."""
+    b = [s[3] for s in sent if s[0] == t and s[1] == 'B0' and s[2] == 0]
+    p = [s[2] for s in sent if s[0] == t and s[1] == 'C0']
+    return (b[-1] if b else None, p[-1] if p else None)
+
+
+check('SEL + PRESETS: U1-21 to U2-01', landed(10400) == (2, 0), str(landed(10400)))
+check('SEL + PRESETS back: U3-05 to U3-01', landed(13900) == (3, 0), str(landed(13900)))
+check('..then to U2-01', landed(14000) == (2, 0), str(landed(14000)))
+check('..then three back, round to U8-01', landed(14100) == (8, 0), str(landed(14100)))
+check('PRESETS onto U1-01 sends bank 1, program 0', landed(800) == (1, 0), str(landed(800)))
 
 # ---- the sound
 data = open(prefix + '.wav', 'rb').read()

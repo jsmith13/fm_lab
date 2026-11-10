@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""OVERSAMPLE, heard: build/host/alias-24.wav is one bright note (tests/mksyx.py's BRIGHT, C7) with
+"""SAMPLE RATE 88.2K (oversampled), heard: build/host/alias-24.wav is one bright note (tests/mksyx.py's BRIGHT, C7) with
 it ON, then again with it OFF. Every partial of that voice is a whole harmonic of the note, so what
 lands between the harmonics is what folded back past 22 kHz. ON has to leave far less of it there,
 and must not change how loud the note is (its fundamental: OFF's fold-back is loud enough to add to
@@ -46,8 +46,8 @@ def measure(x, t):
 
 x = left('alias-24.wav')
 (son, lon), (soff, loff) = measure(x, 1.2), measure(x, 4.2)
-print('OVERSAMPLE ON : between the harmonics %5.1f dB under them, fundamental at %5.1f dBFS' % (son, lon))
-print('OVERSAMPLE OFF: between the harmonics %5.1f dB under them, fundamental at %5.1f dBFS' % (soff, loff))
+print('88.2K: between the harmonics %5.1f dB under them, fundamental at %5.1f dBFS' % (son, lon))
+print('44.1K: between the harmonics %5.1f dB under them, fundamental at %5.1f dBFS' % (soff, loff))
 bad = []
 if son < 30:
     bad.append('ON still leaves a lot between the harmonics')

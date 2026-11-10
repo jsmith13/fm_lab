@@ -45,7 +45,17 @@
 7200 shot
 7400 enc 6 1
 
-# On again: PRESETS sends its program, on channel 3.
+# On again: PRESETS sends its program, on channel 3, with bank select 0 in front of it.
 7800 enc 3 1
 8000 enc 6 1
-8400 end
+
+# Bank select 3 then program 4: U3-05. One click on, and PRESETS sends where it is: bank 3,
+# program 5. Bank select 0 and program 2: back to the voice list's third.
+8400 midi 0xB2 0 3
+8500 midi 0xC2 4 0
+8800 shot
+9000 enc 6 1
+9400 midi 0xB2 0 0
+9500 midi 0xC2 2 0
+9800 shot
+10000 end

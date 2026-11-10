@@ -1,4 +1,4 @@
-# FM Lab -- alias: OVERSAMPLE, heard. BRIGHT (OP2 full on OP1: every harmonic, and nothing else) high up,
+# FM Lab -- alias: SAMPLE RATE 88.2K, oversampled, heard. BRIGHT (OP2 full on OP1: every harmonic, and nothing else) high up,
 # with it ON, then the same note with it OFF. At 44.1 kHz the harmonics above 22 kHz fold back
 # down between the real ones; tests/aliascheck.py measures what lands there in each.
 #
@@ -11,7 +11,7 @@
 800 midi 0x90 96 100
 1800 midi 0x80 96 0
 
-# GLOBAL's fourth bank: OVERSAMPLE, the third knob, OFF.
+# GLOBAL's fourth bank: SAMPLE RATE, the third knob, down one to 44.1K.
 2400 btn 7
 2600 btn 7
 2800 btn 7

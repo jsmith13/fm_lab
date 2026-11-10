@@ -1,0 +1,29 @@
+# FM Lab -- OUTPUT: STEREO, or MONO for a mono plug. tests/monocheck.py checks that the chorus parts
+# the two sides in stereo, that in mono they are the same sample for sample, and that the note is
+# about as loud either way.
+#
+#   build/host/fmlab build/host/mono tests/mono.txt
+
+# INIT VOICE, and the chorus all the way in: the widest the effects make it
+200 enc 6 20
+400 btn 2
+600 enc 2 20
+
+# stereo (as it starts)
+1000 keys 0x80
+2000 keys 0
+
+# GLOBAL's fifth bank, where OUTPUT is the first knob
+2400 btn 7
+2600 btn 7
+2800 btn 7
+3000 btn 7
+3200 btn 7
+3400 shot
+3600 enc 2 1
+3800 shot
+
+# mono
+4000 keys 0x80
+5000 keys 0
+5400 end

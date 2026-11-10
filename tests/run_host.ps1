@@ -117,10 +117,18 @@ if ($args.Count -and [IO.Path]::GetFileName($args[0]) -eq 'depth.txt') {
     if ($LASTEXITCODE) { throw 'the sound is not reaching the DAC with its 24 bits' }
 }
 if ($args.Count -and [IO.Path]::GetFileName($args[0]) -eq 'alias.txt') {
-    python tests\aliascheck.py build\host       # and OVERSAMPLE, against what folds back
-    if ($LASTEXITCODE) { throw 'OVERSAMPLE is not keeping the fold-back out' }
+    python tests\aliascheck.py build\host       # and 88.2K, against what folds back
+    if ($LASTEXITCODE) { throw 'SAMPLE RATE 88.2K is not keeping the fold-back out' }
 }
 if ($args.Count -and [IO.Path]::GetFileName($args[0]) -eq 'bits.txt') {
     python tests\bitscheck.py build\host        # and BIT DEPTH, against its grid
     if ($LASTEXITCODE) { throw 'BIT DEPTH is not cutting the voices to its bits' }
+}
+if ($args.Count -and [IO.Path]::GetFileName($args[0]) -eq 'mono.txt') {
+    python tests\monocheck.py build\host        # and OUTPUT, stereo and mono
+    if ($LASTEXITCODE) { throw 'OUTPUT MONO is not putting the same sound on both sides' }
+}
+if ($args.Count -and [IO.Path]::GetFileName($args[0]) -eq 'srate.txt') {
+    python tests\sratecheck.py build\host       # and SAMPLE RATE, held at each step
+    if ($LASTEXITCODE) { throw 'SAMPLE RATE is not holding the voices at its rate' }
 }

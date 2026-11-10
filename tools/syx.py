@@ -3,11 +3,12 @@
 """Move DX7 patches between a .syx file and the FM-1 over USB-MIDI.
 
   python tools/syx.py send rhodes.syx        # file -> FM-1
-  python tools/syx.py get bank mine.syx      # FM-1's 32 user slots -> file
+  python tools/syx.py get bank mine.syx      # the FM-1 bank you are in (32 slots) -> file
   python tools/syx.py get voice one.syx      # the voice on screen -> file
   python tools/syx.py list                   # what the file holds, without sending it
 
-A bulk dump (4104 bytes) replaces all 32 user slots. A single voice dump (163 bytes) lands in
+A bulk dump (4104 bytes) replaces the 32 slots of the bank you are in (U1..U8: the voice on screen's,
+or the last saved to). A single voice dump (163 bytes) lands in
 the editor, unsaved, exactly as it would on a real DX7 -- press SAVE to keep it.
 
 Many .syx files found online are a bank written as 32 back-to-back single-voice dumps rather
@@ -136,7 +137,7 @@ def send(path):
             port.send(mido.Message("sysex", data=m))
             print(f"\r  sent {k} of {len(msgs)}", end="", flush=True)
             time.sleep(GAP)
-    print("\ndone -- watch the FM-1's screen for BANK RECEIVED or VOICE RECEIVED")
+    print("\ndone -- watch the FM-1's screen for BANK n RECEIVED or VOICE RECEIVED")
 
 
 def get(what, path):
