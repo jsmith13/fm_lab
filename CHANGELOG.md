@@ -4,6 +4,16 @@ FM Lab's releases, newest first. Each one is on the
 [releases page](https://github.com/jsmith13/fm_lab/releases) with its `.fwsc`; the version a build is shows in
 GLOBAL's top-right corner. Versions are `MAJOR.MINOR.PATCH`: a patch fixes what was there, a minor adds to it.
 
+## 1.2.1 — 2026-11-09
+
+### Fixed
+- Support the newer UCUN UC25HQ80 flash chip (`0xB36014`) alongside the Puya P25Q80H (`0x856014`) for
+  settings, user voices, USB rescue and firmware updates. The storage layout is unchanged.
+- Wait up to 2 seconds for a sector erase and 50 milliseconds for a page write. A completed slow operation
+  succeeds; a part still busy at the limit is reset, then the FM-1 restarts without resuming execution from
+  busy flash. Updates feed the watchdog between sector erases. Unknown chips are still refused, including
+  during startup cleanup.
+
 ## 1.2.0 — 2026-11-09
 
 ### Added

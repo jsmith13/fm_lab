@@ -118,9 +118,12 @@ static int ota_in_area(uint32_t off, uint32_t n) { return FL_IN(off, n, OTA_AREA
 static int ota_erase(uint32_t off)
 {
     uint32_t took;
+    int rc;
     if (!ota_in_area(off, 0x1000u) || (off & 0xFFFu))
         return -8;
-    return fl_erase4k(off, &took);
+    rc = fl_erase4k(off, &took);
+    fm1_wdt_feed();
+    return rc;
 }
 static int ota_prog(uint32_t off, const void *p, uint32_t n)
 {
@@ -427,8 +430,9 @@ void fm1_cstart(void)
     fm1_boot.p3_rst = (uint8_t)p3;
     if (boot_mode == BOOT_RECOVERY || recovery_key())
         recovery_main();                        /* OCT- at power-on: the USB rescue */
-    flash_ok = FL_FAR(fl_jedec_ram)() == 0x856014u;
-    ota_boot_cleanup();
+    flash_ok = fl_jedec_ok(FL_FAR(fl_jedec_ram)());
+    if (flash_ok)
+        ota_boot_cleanup();
     lcd_init();
     lcd_fill(0, 0, 240, 240, C_BLACK);
     fm1_input_init();

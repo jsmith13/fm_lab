@@ -131,19 +131,23 @@ RAMINL void fl_inval(uint32_t off, uint32_t len)
         fl_cache_idle();
     }
 }
-RAMINL int fl_wait_ready(uint32_t max_us, uint32_t *took_us)
+/* A timed-out operation may have damaged its sector. Reset the NOR, allow
+ * recovery, then restart the CPU from RAM without resuming flash execution. */
+RAMINL __attribute__((noreturn)) void fl_reset_busy(void)
 {
-    uint32_t t0 = T4_CNT, dt;
-    for (;;) {
-        dt = (T4_CNT - t0) / 24u;
-        if (!(fl_rdsr(0x05) & 1u)) { *took_us = dt; return 0; }
-        if (dt > max_us) { *took_us = dt; return -4; }
-    }
+    uint32_t t0;
+    fl_cs(0); fl_tx(0x66); fl_cs(1);             /* reset enable */
+    fl_cs(0); fl_tx(0x99); fl_cs(1);             /* reset */
+    t0 = T4_CNT;
+    while ((uint32_t)(T4_CNT - t0) < 24u * 20000u) ;
+    REG32(0x10000u) |= 0x10u;                   /* core reset */
+    for (;;) ;
 }
+#include "fm1_flash_policy.h"
 
 /* ---- entry points: IRQs OFF, args/buffers in RAM ---- */
 
-static RAMFN uint32_t fl_jedec_ram(void)                 /* expect 0x856014 */
+static RAMFN uint32_t fl_jedec_ram(void)
 {
     fl_saved_t s; uint32_t id;
     if (fl_enter(&s)) return 0;
@@ -172,9 +176,10 @@ static RAMFN int fl_erase4k_ram(uint32_t off, uint32_t *took_us)
     fl_wren();
     if (!(fl_rdsr(0x05) & 2u)) rc = -3;           /* WEL did not set */
     else {
+        uint32_t issued = T4_CNT;
         fl_cs(0); fl_tx(0x20); fl_addr(off); fl_cs(1);
         fl_inval(off, 4096u);
-        rc = fl_wait_ready(500000u, took_us);     /* generic NOR max 400 ms */
+        rc = fl_wait_ready(issued, FL_ERASE_TIMEOUT_US, took_us);
     }
     fl_exit(&s);
     return rc;
@@ -189,11 +194,12 @@ static RAMFN int fl_prog_ram(uint32_t off, const uint8_t *src, uint32_t n, uint3
     fl_wren();
     if (!(fl_rdsr(0x05) & 2u)) rc = -3;
     else {
+        uint32_t issued = T4_CNT;
         fl_cs(0); fl_tx(0x02); fl_addr(off);
         for (i = 0; i < n; i++) fl_tx(src[i]);
         fl_cs(1);
         fl_inval(off, n);
-        rc = fl_wait_ready(10000u, took_us);      /* generic NOR max 3 ms */
+        rc = fl_wait_ready(issued, FL_PROGRAM_TIMEOUT_US, took_us);
     }
     fl_exit(&s);
     return rc;
