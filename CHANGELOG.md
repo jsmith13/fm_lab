@@ -4,7 +4,7 @@ FM Lab's releases, newest first. Each one is on the
 [releases page](https://github.com/jsmith13/fm_lab/releases) with its `.fwsc`; the version a build is shows in
 GLOBAL's top-right corner. Versions are `MAJOR.MINOR.PATCH`: a patch fixes what was there, a minor adds to it.
 
-## Unreleased
+## 1.2.0 — 2026-11-09
 
 ### Added
 - **256 user slots**, as eight banks of 32: `U1-01` to `U8-32`. Bank `U1` is where it was, so the voices
