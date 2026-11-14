@@ -4,6 +4,40 @@ FM Lab's releases, newest first. Each one is on the
 [releases page](https://github.com/jsmith13/fm_lab/releases) with its `.fwsc`; the version a build is shows in
 GLOBAL's top-right corner. Versions are `MAJOR.MINOR.PATCH`: a patch fixes what was there, a minor adds to it.
 
+## 1.3.3 — 2026-11-14
+
+The installed `1.3.3-test` was reported working well and approved for release on 2026-11-14.
+The release uses the same on-screen version (`1.3.3`) and device identity (`FM-1_973`).
+Detailed CPU/load qualification and validation on the newer flash chip remain outstanding.
+
+### Added
+
+- WT-style system diagnostics at the end of GLOBAL (6/6): app CPU/peak, peak-callback
+  SYN/FX/CTL/POST breakdown, voices, LATE, sample rate and build. SEL requests audio-owned
+  peak/LATE reset rather than mute/solo; parameter knobs are read-only. Host timing is marked
+  NOT DEVICE; existing overload protection and patch/settings formats are unchanged.
+
+- Shared CC assignment layout: envelope-style grouped target selector, PRESETS for group,
+  ALGORITHM for target, SOURCE / DEPTH / POLAR / BEND bottom labels and GLO slot paging.
+  Existing global mappings and stored destination IDs are unchanged.
+
+- Sustain pedal, smooth wheel/expression, adjustable pitch bend (default +/-2 semitones),
+  channel pressure, standard volume/pan/filter/effects CCs, and distinct panic/reset/note-release messages.
+- Sixteen globally stored CC/pressure routes, depth/polarity and on-device Learn via held GLO.
+  Physical parameter edits regain control; the next controller message reactivates the route.
+  Live values never overwrite native patch data. Legacy settings and patch banks remain readable.
+- Sustain-aware repeated notes/stealing/mono fallback, channel-change/overflow recovery, temporary
+  FM brightness/EG bias, and effect activation without clearing large buffers in the audio interrupt.
+- Settings write/readback verification and quiet-tail saving.
+
+### Changed
+
+- Lowered the assignment editor's four knob values/bars toward their bottom labels and removed
+  redundant navigation hints.
+- Physical parameter edits and live controllers share explicit ownership without changing
+  native patch/bank formats. Custom MIDI settings require restoring all route fields and bend
+  range to defaults before downgrading; see [MIDI storage and rollback](docs/MIDI.md#storage-and-rollback).
+
 ## 1.2.1 — 2026-11-09
 
 ### Fixed

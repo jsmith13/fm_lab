@@ -165,10 +165,12 @@ static uint32_t crc32(const uint8_t *p, uint32_t n)
     }
     return ~c;
 }
+static uint32_t settings_loaded_length;
 static int settings_load(void *p, uint32_t n)   /* 0: loaded; else p is untouched */
 {
-    static uint8_t buf[256];
+    static uint8_t buf[512];
     uint32_t h[3];
+    settings_loaded_length = 0;
     if (!flash_ok || n > sizeof buf || st_read(SETTINGS_AT, h, sizeof h) || h[0] != SETTINGS_MAGIC)
         return -1;
     /* A shorter store is an older build of the same settings, so load what it has and leave the
@@ -179,13 +181,14 @@ static int settings_load(void *p, uint32_t n)   /* 0: loaded; else p is untouche
     if (st_read(SETTINGS_AT + sizeof h, buf, h[1]) || crc32(buf, h[1]) != h[2])
         return -1;
     memcpy(p, buf, h[1]);
+    settings_loaded_length = h[1];
     return 0;
 }
-static int settings_save(const void *p, uint32_t n)   /* p in RAM, n <= 256 */
+static int settings_save(const void *p, uint32_t n)   /* p in RAM, n <= 512 */
 {
     uint32_t h[3] = {SETTINGS_MAGIC, n, 0}, took;
     int rc;
-    if (!flash_ok || n > 256u)
+    if (!flash_ok || n > 512u)
         return -1;
     h[2] = crc32(p, n);
     if ((rc = fl_erase4k(SETTINGS_AT, &took)) != 0)

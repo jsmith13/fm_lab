@@ -37,6 +37,11 @@ def main(stem):
     def shot(ms):
         return stem.with_name(stem.name + f"-{ms}.ppm").read_bytes()
 
+    def stable_shot(ms):
+        pixels = shot(ms).split(b"\n", 1)[1]
+        # Ignore the live status indicator at the bottom right, not the voice/parameter display.
+        return b"".join(pixels[y * 720:y * 720 + (576 if y >= 224 else 720)] for y in range(240))
+
     out = [(int(m.group(1)), m.group(2), int(m.group(3)), int(m.group(4)))
            for m in re.finditer(r"^\s*(\d+) ms  MIDI out (\w\w) (\d+) (\d+)",
                                 stem.with_name(stem.name + ".log").read_text(), re.M)]
@@ -49,7 +54,7 @@ def main(stem):
     keys = [o for o in out if 4500 <= o[0] <= 4900]
     check("a key sends on channel 3", [o[1] for o in keys] == ["92", "82"], str(keys))
     check("program 5 on channel 3 changes the voice", shot(5800) != shot(5200))
-    check("program 3 on channel 1 does not", shot(6400) == shot(5800))
+    check("program 3 on channel 1 does not", stable_shot(6400) == stable_shot(5800))
     pcs = [o for o in out if o[1][0] in "BC"]
     # voice 6 from program 5, one click to 7 unheard, one to 8 sent as program 7 -- had program 9
     # been taken while OFF, it would say 11. Then bank 3 program 4 is U3-05, one on is U3-06.

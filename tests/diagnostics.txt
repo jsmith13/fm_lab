@@ -1,0 +1,28 @@
+# The final GLOBAL bank is read-only, and SEL resets timing rather than muting/soloing.
+200 enc 6 20
+300 midi 0x90 69 100
+500 btn 7
+550 shot
+650 enc 0 5
+800 shot
+900 btn 3
+1000 shot
+1100 enc 2 8
+1120 enc 3 8
+1140 enc 4 8
+1160 enc 5 8
+1300 shot
+1400 btn 3 500
+2000 shot
+2100 btn 7
+2300 shot
+2400 enc 0 -1
+2600 shot
+# A knob turned under SEL must suppress its reset gesture without leaking to the next bank.
+3500 btn 3 500
+3600 enc 2 8
+4050 shot
+4100 btn 8
+4200 shot
+4300 midi 0x80 69 0
+4700 end

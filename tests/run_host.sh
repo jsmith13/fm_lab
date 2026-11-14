@@ -22,6 +22,11 @@ if [ -n "$script" ]; then
     out=build/host/${name%.*}
 fi
 cc -O2 -Wall -Wno-unused-function -DDINGHY_HOST -DAPP_VER="\"${APP_VER:-DEV}\"" -Ifirmware/src -Ifirmware/gen -o build/host/fmlab firmware/src/fmlab.c
+case "$script" in
+*/controllers.txt|*/diagnostics.txt)
+    cc -O2 -Wall -Wno-unused-function -Ifirmware/src -Ifirmware/gen -o build/host/midi_host tests/midi_host.c
+    build/host/midi_host ;;
+esac
 rm -f "$out"-*.ppm "$out"-*.png "$out"-bank.bin "$out"-out.syx   # the bank outlives a run, as flash does
 case "$script" in
 */bank.txt|*/alias.txt) python3 tests/mksyx.py build/host ;; # the .syx files it sends itself
@@ -29,6 +34,8 @@ esac
 build/host/fmlab "$out" $script > "$out".log   # the log is kept: panelcheck.py reads the MIDI out of it
 cat "$out".log
 case "$script" in                                           # while the screens are still PPMs
+*/controllers.txt) python3 tests/controllercheck.py "$out" ;;
+*/diagnostics.txt) python3 tests/diagnosticcheck.py "$out" ;;
 */panel.txt) python3 tests/panelcheck.py "$out" ;;          # the pages and the keys that are not keys
 */spectrum.txt) python3 tests/speccheck.py "$out" ;;        # the analyser, against the arithmetic
 */levels.txt) python3 tests/levelcheck.py "$out" ;;         # the operator boxes, against the envelopes

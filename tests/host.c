@@ -95,17 +95,23 @@ static void lcd_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, const uint1
 #define CV_MAX (240u * 136u)         /* must match platform.c, or the host silently clamps a canvas */
 #include "gfx.c"
 
-static uint8_t host_store[256 + 4];
+static uint8_t host_store[512 + 4];
+static uint32_t settings_loaded_length;
 static int settings_load(void *p, uint32_t n)
 {
-    if (host_store[0] != 1 || n > 256u || host_store[1] == 0u || host_store[1] > n) return -1;
-    memcpy(p, host_store + 4, host_store[1]);   /* a short store loads its prefix, as on the device */
+    uint32_t length = host_store[1]+(host_store[0] == 2u ? 256u*host_store[2] : 0u);
+    settings_loaded_length = 0;
+    if ((host_store[0] != 1u && host_store[0] != 2u) || n > 512u || !length || length > n) return -1;
+    memcpy(p, host_store + 4, length);
+    settings_loaded_length = length;
     return 0;
 }
 static int settings_save(const void *p, uint32_t n)
 {
-    host_store[0] = 1;
+    if (!n || n > 512u) return -1;
+    host_store[0] = n > 255u ? 2u : 1u;
     host_store[1] = (uint8_t)n;
+    host_store[2] = (uint8_t)(n >> 8);
     memcpy(host_store + 4, p, n);
     printf("%6u ms  settings saved (%u B)\n", fm1_ms, n);
     return 0;

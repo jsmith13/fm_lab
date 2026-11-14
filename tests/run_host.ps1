@@ -16,6 +16,12 @@ $cl = "cl /nologo /TC /O2 /W3 /DDINGHY_HOST /DAPP_VER=\""$ver\"" /Itests /FImsvc
       "/Ifirmware\src /Ifirmware\gen firmware\src\fmlab.c /Fo:build\host\ /Fe:build\host\fmlab.exe"
 & $env:ComSpec /c "call `"$vcvars`" >nul && $cl"
 if ($LASTEXITCODE) { throw 'build failed' }
+if ($args.Count -and [IO.Path]::GetFileName($args[0]) -in 'controllers.txt', 'diagnostics.txt') {
+    $unit = 'cl /nologo /TC /O2 /W3 /Itests /FImsvc.h /Ifirmware\src /Ifirmware\gen ' +
+            'tests\midi_host.c /Fo:build\host\midi_host.obj /Fe:build\host\midi_host.exe'
+    & $env:ComSpec /c "call `"$vcvars`" >nul && $unit && build\host\midi_host.exe"
+    if ($LASTEXITCODE) { throw 'MIDI controller unit checks failed' }
+}
 
 # a script's output is named after it, so the runs do not overwrite each other
 $out = 'build\host\fmlab'
@@ -31,6 +37,14 @@ if ($args.Count -and [IO.Path]::GetFileName($args[0]) -in 'bank.txt', 'alias.txt
 
 & build\host\fmlab.exe $out @args | Tee-Object "$out.log"
 if ($LASTEXITCODE) { throw 'run failed' }
+if ($args.Count -and [IO.Path]::GetFileName($args[0]) -eq 'controllers.txt') {
+    python tests\controllercheck.py $out
+    if ($LASTEXITCODE) { throw 'MIDI controller audio/editor checks failed' }
+}
+if ($args.Count -and [IO.Path]::GetFileName($args[0]) -eq 'diagnostics.txt') {
+    python tests\diagnosticcheck.py $out
+    if ($LASTEXITCODE) { throw 'GLOBAL diagnostic UI/audio checks failed' }
+}
 
 if ($args.Count -and [IO.Path]::GetFileName($args[0]) -eq 'operators.txt') {
     python tests\wavcheck.py "$out.wav"      # the switches have to agree with the sound

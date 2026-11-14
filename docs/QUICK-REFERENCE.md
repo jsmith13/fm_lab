@@ -6,6 +6,13 @@ always names the four knobs.
 
 ## Knobs
 
+**MIDI Learn:** hold **GLO** 400 ms. **SELECT** picks a slot; another **GLO** press advances it.
+**PRESETS** picks a destination group; **ALGORITHM** picks its target.
+Knobs 1..4 set **SOURCE / DEPTH / POLAR / BEND**.
+**SEL** arms/cancels Learn; move a CC or channel-pressure controller.
+**SAVE** clears only the source, retaining the other settings; **HOME** exits.
+`*` means the global mapping is still waiting for a quiet settings save. See [MIDI.md](MIDI.md).
+
 | Knob | Does |
 | --- | --- |
 | **PRESETS** | The voice: 20 factory voices, then user slots `U1-01`–`U8-32`. **SEL** held: a bank at a time. Changes under held notes. While saving: the slot. |
@@ -23,7 +30,7 @@ always names the four knobs.
 | **ENV** | On HOME: `ATK DEC SUS REL` for one operator; again: next operator. On `GLOBAL` or `PITCH`: that envelope off / on | The ENVELOPE page; again: next bank |
 | **LFO** | On HOME: this operator's `A M SENS`; again: next operator. On `GLOBAL`: the LFO's wave | The LFO page; again: next bank |
 | **FX** | On HOME: the four effects' `MIX` | The EFFECTS page, one effect a bank; again: next effect |
-| **GLO** | The GLOBAL page; again: next bank | — |
+| **GLO** | The GLOBAL page; again: next bank | MIDI assignments / Learn |
 | **SEL** | Selected operator off / on | Solo it; hold again: all back on |
 | **ARP** | Its knobs on HOME; again: arpeggiator on / off | — |
 | **SEQ** | The looper's knobs on HOME | The step view |
@@ -68,11 +75,22 @@ A tap of **EDIT**, **ENV**, **LFO**, **FX**, **ARP** or **SEQ** borrows the knob
 | OPERATOR | `LEVEL RATIO DETUNE WAVE` · `MODE COARSE FINE V SENS` · `AMSENS RT SCL BRK PT L DEP` · `R DEP L CRV R CRV` |
 | ENVELOPE | `ATTACK DECAY SUSTAIN RELEASE` · then the four segments, a rate and its level each. On `PITCH`: the pitch envelope's four. |
 | LFO | `SPEED DELAY WAVE` · `P MOD A MOD PMSENS` · `K SYNC` |
-| GLOBAL | `ALGO FEEDBK O SYNC TRANSP` · the pitch envelope's rates · its levels · `MIDICH PRG CH S RATE BITS` · `OUTPUT` (stereo / mono). The CPU meter is the bottom line; the firmware version is top right. |
+| GLOBAL | `ALGO FEEDBK O SYNC TRANSP` · the pitch envelope's rates · its levels · `MIDICH PRG CH S RATE BITS` · `OUTPUT` (stereo / mono) · system diagnostics. The CPU meter is the bottom line; the firmware version is top right. |
 | EFFECTS | `CHORUS` · `PHASER` · `DELAY` · `REVERB`, each `MIX` first; `MIX 0` is off |
 | ARP (tap) | `TEMPO PATTERN OCTAVE LATCH` · `GATE RATE SWING VELO` |
 | SEQ (tap) | `TEMPO BARS DIV CLICK` |
 | Step view (hold SEQ) | `LENGTH TEMPO BARS DIV`. **SELECT** moves the cursor; a key adds or removes its note on that step. |
+
+## System diagnostics
+
+The final GLOBAL bank (**6/6**) shows app CPU/peak, active voices, LATE callbacks, sample rate
+and build. **GLO** or **SELECT** walks to it; **SEL** requests peak/LATE reset on the next audio
+callback, without muting/soloing or changing settings. The four parameter knobs are read-only.
+At the recorded peak, **SYN** is voices/envelopes/downsampling, **FX** is effects, **CTL** is
+controllers/notes/ARP/SEQ, and **POST** is filter/quality/analyser/output processing.
+Percentages use the 256-frame 44.1 kHz deadline (~5.80 ms); they exclude other USB/platform/mastering
+work. LATE counts app callbacks exceeding that deadline, not hardware underruns.
+Host builds explicitly say **NOT DEVICE**; hardware headroom still needs testing on the instrument.
 
 ## What is kept where
 

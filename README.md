@@ -36,9 +36,22 @@ says why each one works the way it does.
 
 ## The instrument
 
+**MIDI controller support (1.3.3):** hold **GLO** for the matching FM/WT assignment editor.
+Sustain, wheel, expression, bend and channel pressure now work, with sixteen global routes and
+on-device Learn. See [MIDI controls and Learn](docs/MIDI.md). Live MIDI does not edit saved patches.
+The installed `1.3.3-test` was reported working well and approved for release as **1.3.3** on 2026-11-14.
+Package/source/archive checks, updater restart and independent USB audio/MIDI enumeration pass.
+The device timing figures above describe pre-MIDI firmware; detailed CPU/load qualification remains
+outstanding. The `1.2.1` rollback package is retained.
+
+GLOBAL's final bank now has a WT-style diagnostics screen: app CPU/peak, peak-callback
+SYN/FX/CTL/POST breakdown, voices, LATE, sample rate and build. SEL resets peak/LATE through
+the audio owner without muting notes; its parameter knobs are read-only. Host timing is explicitly
+marked NOT DEVICE. This addition is included in **1.3.3**.
+
 **8 voices**, each a full six-operator DX7: 32 algorithms, feedback, per-operator envelopes and keyboard
 scaling, the pitch envelope, the LFO. Notes come from the keys, from USB-MIDI or from the 3.5 mm MIDI IN jack — on any channel, or the one GLOBAL's `MIDI` bank picks. When all eight
-are busy the oldest released note goes first, then the oldest held one.
+are busy released notes go first, then pedal-held notes, then physically held notes.
 
 **20 factory voices** to start from, and between them they show a lot — what feedback does, what a 7:1 ratio
 sounds like, how an algorithm with four carriers differs from one with one. They are Sven Trogus's, made

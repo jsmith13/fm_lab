@@ -370,6 +370,8 @@ typedef struct {
     uint8_t alg, fb_shift, on;
     int32_t pmdepth, pmsens, amdepth;
     int32_t bright;              /* sloopDX: the modulators' level offset, Q24 log2 (0 = as Dexed) */
+    int32_t controller_vibrato, controller_bias;
+    uint8_t controller_mutes;
 } dxv_t;
 
 static const uint8_t DX_ALG[32][6] = {      /* FmCore::algorithms (Dexed) */
@@ -468,8 +470,8 @@ static void dx_update(dxv_t *v, const uint8_t *p, int note, int vel)
 /* FM Lab's. Move a sounding voice to another note without starting it again: the operator pitches
  * follow, and the levels are re-scaled because key scaling and velocity depend on the note, but the
  * envelopes stay where they are and the LFO and pitch EG keep running. This is what legato is --
- * the second note of a slur does not get its own attack -- and it is the one thing dx_update()
- * cannot be used for, since a patch change is meant to restart the LFO and this is not one. */
+ * the second note of a slur does not get its own attack. Unlike a full parameter update, this
+ * changes only note-dependent frequency and level scaling; LFO settings remain untouched. */
 static void dx_retune(dxv_t *v, const uint8_t *p, int note, int vel)
 {
     int op;
@@ -506,6 +508,7 @@ static void dx_init(dxv_t *v, const uint8_t *p, int note, int vel)
     dx_lfo_reset(&v->lfo, p + 137);
     dx_lfo_keydown(&v->lfo);
     v->bright = 0;
+    v->controller_vibrato = v->controller_bias = 0; v->controller_mutes = 0;
     v->on = 1;
 }
 
@@ -604,7 +607,7 @@ static void dx_compute_ext(dxv_t *v, int32_t *out, int32_t lfo_val, int32_t lfo_
     int32_t pmod, amod, senslfo, pm1;
     uint32_t pmd;
     int op;
-    /* pitch: the LFO (Dexed: the larger of the LFO and the mod wheel; no wheel here), the pitch envelope */
+    /* The controller adds depth to the patch LFO without replacing its programmed modulation. */
     pmd = (uint32_t)v->pmdepth * (uint32_t)lfo_delay;
     senslfo = v->pmsens * (lfo_val - (1 << 23));
     pm1 = (int32_t)(((int64_t)pmd * (int64_t)senslfo) >> 39);
@@ -613,6 +616,10 @@ static void dx_compute_ext(dxv_t *v, int32_t *out, int32_t lfo_val, int32_t lfo_
     if (dx_peg_off)
         pmod = 0;
     pmod += pm1 * (senslfo < 0 ? -1 : 1) + pitch;
+    if (v->controller_vibrato) {
+        int32_t wheel = (int32_t)(((int64_t)(lfo_val-(1 << 23))*v->controller_vibrato) >> 23);
+        pmod += (int32_t)(((int64_t)wheel*lfo_delay) >> 24);
+    }
     /* amplitude: the LFO */
     lfo_val = (1 << 24) - lfo_val;
     amod = (int32_t)(uint32_t)(((int64_t)v->amdepth * lfo_delay) >> 8);
@@ -628,7 +635,11 @@ static void dx_compute_ext(dxv_t *v, int32_t *out, int32_t lfo_val, int32_t lfo_
                             : DX_AMS_PT[i] + (uint32_t)(((uint64_t)(DX_AMS_PT[i + 1] - DX_AMS_PT[i]) * (sensamp & 16383u)) >> 14);
             level -= (int32_t)(uint32_t)(((uint64_t)(uint32_t)level * ((uint64_t)pt << 4)) >> 28);
         }
-        if (v->bright && (DX_ALG[v->alg][op] & 3)) {   /* sloopDX: brightness on the modulators (ENV / LFO -> FLT, SHP) */
+        if (v->controller_bias && !(v->controller_mutes >> op & 1u)) {
+            level += v->controller_bias;
+            level = level < 0 ? 0 : level > (16 << 24) ? (16 << 24) : level;
+        }
+        if (v->bright && !(v->controller_mutes >> op & 1u) && (DX_ALG[v->alg][op] & 3)) {
             level += v->bright;
             level = level < 0 ? 0 : level > (16 << 24) ? (16 << 24) : level;
         }

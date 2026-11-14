@@ -73,9 +73,11 @@
 
 #define DX_LG_N 6                               /* 64-sample blocks: as Dexed renders, 4 per audio ISR */
 #include "dx7_voice.h"                          /* first: the core reads the wave bytes it lays out */
+#include "fm_midi.h"
 #include "dx7_core.c"
 #include "dx7_voices.h"
 #include "spectrum.h"
+#include <stddef.h>
 
 #define NV 8u                                   /* voices (RAM: 428 B each) */
 
@@ -247,17 +249,20 @@ static uint32_t name_sum(void)                  /* enough of the name to notice 
 }
 
 /* ---- main loop -> audio ISR: a single-producer ring of note events */
-enum { EV_ON = 1, EV_OFF, EV_PATCH, EV_MONO, EV_PANIC };
+enum { EV_ON = 1, EV_OFF, EV_PATCH, EV_MONO, EV_PANIC, EV_SUSTAIN, EV_RELEASE_ALL, EV_SILENCE };
 typedef struct { uint8_t kind, note, vel; } ev_t;
 #define EVQ 32u
 static ev_t evq[EVQ];
-static volatile uint32_t ev_w, ev_r;
+static volatile uint32_t ev_w, ev_r, ev_overflow;
+static void say(const char *text);
+static uint32_t midi_sustain, midi_silence;
 
 static void ev_push(uint32_t kind, uint32_t note, uint32_t vel)
 {
     uint32_t w = ev_w;
-    if (w - ev_r >= EVQ)
-        return;                                 /* full: drop (the ISR is 5.8 ms behind at worst) */
+    if (ev_overflow || w - ev_r >= EVQ) {
+        ev_overflow = 1; say("EVENT OVERFLOW"); return;
+    }
     /* a patch event only says "read pbuf[pcur] again", so a second one behind the first is nothing:
      * a knob turned quickly would otherwise queue a dx_update of every voice per detent */
     if (kind == EV_PATCH && w != ev_r && evq[(w - 1u) % EVQ].kind == EV_PATCH)
@@ -293,12 +298,13 @@ static void patch_publish(void)                 /* main loop: hand `edit` to the
 /* ---- the voices (the ISR's) */
 static dxv_t dxv[NV];
 static struct {
-    uint8_t note, vel, held;
+    uint8_t note, vel, held, sustained;
     uint32_t age;
 } vst[NV];
 static uint32_t ages;
 static volatile uint32_t v_lit;                 /* bit v: voice v sounds (the main loop reads, for the LEDs) */
 static volatile uint8_t v_last;                 /* the newest note: the one the displays follow */
+static volatile uint32_t midi_quiet_blocks;
 
 /* ---- the global envelope (FM Lab's; a DX7 has nothing like it)
  *
@@ -377,6 +383,7 @@ static const int32_t GSTEP[100] = {
 /* The main loop writes these and the ISR reads them. They are single bytes, so a read cannot catch
  * half of a write, and the worst a race can do is apply last block's attack time to this block. */
 static volatile uint8_t gpar[G_N] = {0, 50, 99, 99};
+static uint8_t g_live[G_N] = {0, 50, 99, 99};
 
 /* A falling stage at the top of its knob does not fall at all. Attack has no such need: 0 is
  * already instant, and an attack that never arrived would simply be silence. */
@@ -392,13 +399,13 @@ static int32_t g_fall(uint32_t v)
  * shape people actually want, and it is the only way to make a note start quiet. */
 static int32_t g_rel(void)
 {
-    uint32_t v = gpar[G_REL];
+    uint32_t v = g_live[G_REL];
     return (v == 0u || v >= 99u) ? 0 : GSTEP[v];
 }
 
 static uint32_t genv_idle(void)                 /* straight to full, stays there, never falls */
 {
-    return gpar[G_ATK] == 0u && gpar[G_SUS] >= 99u && g_rel() == 0;
+    return g_live[G_ATK] == 0u && g_live[G_SUS] >= 99u && g_rel() == 0;
 }
 
 enum { GS_OFF = 0, GS_ATK, GS_DEC, GS_REL };    /* sustain is decay that has arrived */
@@ -407,7 +414,7 @@ static struct { uint8_t st, hold; int32_t g; } genv[NV];
 
 static int32_t g_sus(void)
 {
-    return gpar[G_SUS] >= 99u ? G_ONE : (int32_t)gpar[G_SUS] * (G_ONE / 99);
+    return g_live[G_SUS] >= 99u ? G_ONE : (int32_t)g_live[G_SUS] * (G_ONE / 99);
 }
 
 /* One block of it. Decay and sustain are the same state: it walks towards the sustain level at the
@@ -418,12 +425,12 @@ static void genv_block(uint32_t v)
     int32_t g = genv[v].g, t, d;
     switch (genv[v].st) {
     case GS_ATK:
-        g += GSTEP[gpar[G_ATK]];
+        g += GSTEP[g_live[G_ATK]];
         if (g >= G_ONE) { g = G_ONE; genv[v].st = GS_DEC; }
         break;
     case GS_DEC:
         t = g_sus();
-        d = g_fall(gpar[G_DEC]);
+        d = g_fall(g_live[G_DEC]);
         if (g > t)      { g -= d; if (g < t) g = t; }
         else if (g < t) { g += d; if (g > t) g = t; }
         break;
@@ -446,7 +453,7 @@ static void genv_block(uint32_t v)
 static void genv_key(uint32_t v, int again)     /* a note starts; `again` means it is not a slur */
 {
     if (again)
-        genv[v].g = gpar[G_ATK] ? 0 : G_ONE;
+        genv[v].g = g_live[G_ATK] ? 0 : G_ONE;
     genv[v].st = GS_ATK;
     genv[v].hold = 0;
 }
@@ -479,20 +486,40 @@ static void v_on(uint32_t note, uint32_t vel)
 {
     uint32_t v, pick = 0, best = 0xFFFFFFFFu, score;
     for (v = 0; v < NV; v++) {
-        if (vst[v].held && vst[v].note == note) score = 0u;                     /* the same key again */
+        if ((vst[v].held || vst[v].sustained) && vst[v].note == note) score = 0u;
         else if (!dxv[v].on)                    score = 1u;                     /* never used */
         else if (!dx_playing(&dxv[v]))          score = 2u;                     /* finished */
-        else if (!vst[v].held)                  score = 0x40000000u + vst[v].age;  /* releasing: oldest */
+        else if (!vst[v].held && !vst[v].sustained) score = 0x40000000u + vst[v].age;
+        else if (vst[v].sustained)              score = 0x60000000u + vst[v].age;
         else                                    score = 0x80000000u + vst[v].age;  /* held: oldest */
         if (score < best) { best = score; pick = v; }
     }
     vst[pick].note = (uint8_t)note;
     vst[pick].vel = (uint8_t)vel;
-    vst[pick].held = 1;
+    vst[pick].held = 1; vst[pick].sustained = 0;
     vst[pick].age = ++ages;
-    dx_init(&dxv[pick], pbuf[pcur], tnote(note), (int)vel);
+    dx_init(&dxv[pick], midi_voice, tnote(note), (int)vel);
     genv_key(pick, 1);
     v_last = (uint8_t)pick;                     /* the envelope and the diagram follow the newest note */
+}
+
+static void v_release(uint32_t v)
+{
+    vst[v].held = 0;
+    if (midi_sustain) vst[v].sustained = 1;
+    else {
+        vst[v].sustained = 0;
+        if (genv_rel(v)) dx_keyup(&dxv[v]);
+    }
+}
+
+static void v_pedal(uint32_t down)
+{
+    uint32_t v;
+    midi_sustain = down != 0u;
+    if (!midi_sustain)
+        for (v = 0; v < NV; v++)
+            if (vst[v].sustained && !vst[v].held) v_release(v);
 }
 
 static void v_off(uint32_t note)
@@ -500,9 +527,7 @@ static void v_off(uint32_t note)
     uint32_t v;
     for (v = 0; v < NV; v++)
         if (dxv[v].on && vst[v].held && vst[v].note == note) {
-            vst[v].held = 0;
-            if (genv_rel(v))
-                dx_keyup(&dxv[v]);
+            v_release(v);
         }
 }
 
@@ -538,9 +563,10 @@ static void m_follow(uint32_t note, uint32_t vel, int again)
     vst[0].vel = (uint8_t)vel;
     vst[0].age = ++ages;
     if (again)
-        dx_init(&dxv[0], pbuf[pcur], tnote(note), (int)vel);
+        dx_init(&dxv[0], midi_voice, tnote(note), (int)vel);
     else
-        dx_retune(&dxv[0], pbuf[pcur], tnote(note), (int)vel);
+        dx_retune(&dxv[0], midi_voice, tnote(note), (int)vel);
+    vst[0].sustained = 0;
     genv_key(0, again);                         /* a slur keeps the envelope it began with */
     v_last = 0;
 }
@@ -565,9 +591,7 @@ static void m_off(uint32_t note)
     if (!m_drop(note))
         return;
     if (!mheld) {
-        vst[0].held = 0;
-        if (genv_rel(0))
-            dx_keyup(&dxv[0]);
+        v_release(0);
         return;
     }
     m_follow(mnote[mheld - 1u], mvel[mheld - 1u], 0);
@@ -575,6 +599,15 @@ static void m_off(uint32_t note)
 
 static void ev_drain(void)                      /* audio ISR, before the render */
 {
+    if (ev_overflow) {
+        uint32_t v;
+        ev_r = ev_w; mheld = midi_sustain = 0; midi_silence = 1;
+        for (v = 0; v < NV; v++) {
+            dxv[v].on = vst[v].held = vst[v].sustained = 0;
+            genv[v].st = GS_OFF; genv[v].hold = 0;
+        }
+        RING_PUBLISH(); ev_overflow = 0;
+    }
     while (ev_r != ev_w) {
         const ev_t *e = &evq[ev_r % EVQ];
         uint32_t v;
@@ -584,20 +617,27 @@ static void ev_drain(void)                      /* audio ISR, before the render 
         case EV_PATCH:                          /* the voice changed under the sounding notes */
             for (v = 0; v < NV; v++)
                 if (dxv[v].on)
-                    dx_update(&dxv[v], pbuf[pcur], tnote(vst[v].note), (int)vst[v].vel);
+                    dx_update(&dxv[v], midi_voice, tnote(vst[v].note), (int)vst[v].vel);
             break;
         case EV_MONO:                           /* the switch itself: start the new mode from silence */
             monomode = (uint8_t)e->note;
             for (v = 0; v < NV; v++) {
-                dxv[v].on = 0; vst[v].held = 0; genv[v].st = GS_OFF; genv[v].hold = 0;
+                dxv[v].on = 0; vst[v].held = vst[v].sustained = 0; genv[v].st = GS_OFF; genv[v].hold = 0;
             }
             mheld = 0;
             break;
         case EV_PANIC:
+        case EV_SILENCE:
             for (v = 0; v < NV; v++) {
-                dxv[v].on = 0; vst[v].held = 0; genv[v].st = GS_OFF; genv[v].hold = 0;
+                dxv[v].on = 0; vst[v].held = vst[v].sustained = 0; genv[v].st = GS_OFF; genv[v].hold = 0;
             }
             mheld = 0;
+            if (e->kind == EV_SILENCE) midi_silence = 1;
+            break;
+        case EV_SUSTAIN: v_pedal(e->note); break;
+        case EV_RELEASE_ALL:
+            mheld = 0;
+            for (v = 0; v < NV; v++) if (vst[v].held) v_release(v);
             break;
         default: break;
         }
@@ -783,6 +823,24 @@ static void pl_tick(const play_t *p)            /* once a 64-sample block, befor
 #define BUDGET_US (HALF_FRAMES * 1000000u / FS)
 static volatile uint32_t cpu_q8, cpu_peak;      /* Q8 of the budget; the worst block so far, in percent */
 static uint8_t cpu_over;                        /* bit k: the block k blocks ago took over 85 % */
+typedef struct { uint32_t percent, synth, fx, control, post; } cpu_profile_t;
+static cpu_profile_t cpu_profiles[2];
+static volatile uint32_t cpu_profile_index, cpu_late, cpu_reset_generation;
+static uint32_t cpu_reset_seen;
+
+static void cpu_request_reset(void)
+{
+    RING_PUBLISH(); cpu_reset_generation++;
+}
+
+static void cpu_reset_pending(void)
+{
+    uint32_t generation = cpu_reset_generation;
+    if (generation == cpu_reset_seen) return;
+    cpu_peak = cpu_late = 0;
+    memset(cpu_profiles,0,sizeof cpu_profiles);
+    cpu_reset_seen = generation;
+}
 
 static void v_shed(void)                        /* overloaded: lose a voice rather than glitch every voice */
 {
@@ -795,6 +853,26 @@ static void v_shed(void)                        /* overloaded: lose a voice rath
     }
     if (pick < NV)
         dxv[pick].on = 0;
+}
+
+static void cpu_report(uint32_t ticks, const cpu_profile_t *parts)
+{
+    uint32_t us = ticks / FM1_TICKS_PER_US, percent = us * 100u / BUDGET_US;
+    if (percent > cpu_peak) {
+        uint32_t next = cpu_profile_index ^ 1u;
+        cpu_profile_t *p = &cpu_profiles[next];
+        p->percent = percent;
+        p->synth = parts->synth / FM1_TICKS_PER_US * 100u / BUDGET_US;
+        p->fx = parts->fx / FM1_TICKS_PER_US * 100u / BUDGET_US;
+        p->control = parts->control / FM1_TICKS_PER_US * 100u / BUDGET_US;
+        p->post = parts->post / FM1_TICKS_PER_US * 100u / BUDGET_US;
+        RING_PUBLISH(); cpu_profile_index = next;
+        cpu_peak = percent;
+    }
+    if (us > BUDGET_US) cpu_late++;
+    cpu_q8 = (cpu_q8 * 15u + us * 256u / BUDGET_US) / 16u;
+    cpu_over = (uint8_t)(cpu_over << 1 | (us * 100u > BUDGET_US * 85u));
+    if ((cpu_over & 3u) == 3u) v_shed();
 }
 
 /* ---- the filter's coefficients, as the ISR reads them. Worked out in the main loop, because they
@@ -986,6 +1064,7 @@ static int32_t rv_line[RV_NL] __attribute__((section(".pool")));  /* Q8: a tail 
 static int32_t rv_ap[RV_NA] __attribute__((section(".pool")));
 static struct {
     uint32_t cw, ch_ph, ph_ph, dw, pw;
+    uint32_t cv, dv, pv, lv[4], av[4];
     int32_t ph_x[6], ph_y[6], ph_last, ph_a;
     int32_t d_cur, d_lp;                        /* the delay's length now, Q8, gliding to TIME's */
     uint16_t li[4], ai[4];
@@ -999,6 +1078,14 @@ static uint32_t tri16(uint32_t ph)              /* a triangle, 0 .. 65535 .. 0, 
 {
     uint32_t t = ph >> 15;
     return t < 65536u ? t : 131071u - t;
+}
+
+static int32_t fx_chorus_tap(uint32_t delay)
+{
+    uint32_t age = delay >> 8, p = xs.cw-age;
+    int32_t a = age < xs.cv ? cho_buf[p & (CHO_LEN-1u)] : 0;
+    int32_t b = age+1u < xs.cv ? cho_buf[(p-1u) & (CHO_LEN-1u)] : 0;
+    return a+(int32_t)(((int64_t)(b-a)*(delay & 255u)) >> 8);
 }
 
 /* n = DX_N samples: l in, and l and r out, all Q23 */
@@ -1035,63 +1122,69 @@ static void fx_run(const fx_t *x, int32_t *l, int32_t *r)
         xs.ph_a = a1;
     }
     if (!(x->on & 1u << FX_CHO)) {
+        xs.cv = 0;
         for (i = 0; i < DX_N; i++)
             r[i] = l[i];
     } else {
         for (i = 0; i < DX_N; i++) {
-            int32_t m = l[i], d, p, f, a, b;
+            int32_t m = l[i], d;
             cho_buf[xs.cw & (CHO_LEN - 1u)] = m;
+            if (xs.cv < CHO_LEN) xs.cv++;
             xs.ch_ph += x->ch_inc;
             d = CHO_BASE + (int32_t)(((tri16(xs.ch_ph) >> 4) * (uint32_t)x->ch_dep) >> 12);
-            p = (int32_t)xs.cw - (d >> 8); f = d & 255;
-            a = cho_buf[(uint32_t)p & (CHO_LEN - 1u)]; b = cho_buf[(uint32_t)(p - 1) & (CHO_LEN - 1u)];
-            l[i] = m + mulq15(a + (int32_t)(((int64_t)(b - a) * f) >> 8) - m, x->ch_mix);
+            l[i] = m+mulq15(fx_chorus_tap((uint32_t)d)-m,x->ch_mix);
             d = CHO_BASE + (int32_t)(((tri16(xs.ch_ph + (uint32_t)x->ch_wid) >> 4) * (uint32_t)x->ch_dep) >> 12);
-            p = (int32_t)xs.cw - (d >> 8); f = d & 255;
-            a = cho_buf[(uint32_t)p & (CHO_LEN - 1u)]; b = cho_buf[(uint32_t)(p - 1) & (CHO_LEN - 1u)];
-            r[i] = m + mulq15(a + (int32_t)(((int64_t)(b - a) * f) >> 8) - m, x->ch_mix);
+            r[i] = m+mulq15(fx_chorus_tap((uint32_t)d)-m,x->ch_mix);
             xs.cw++;
         }
     }
     if (!(x->on & 1u << FX_DLY)) {
+        xs.dv = 0;
         xs.d_cur = x->dl_len << 8;
         xs.d_lp = 0;
     } else {
+        if (!xs.dv) xs.d_cur = x->dl_len << 8;
         for (i = 0; i < DX_N; i++) {
-            int32_t df = (x->dl_len << 8) - xs.d_cur, p, f, a, b, e;
+            int32_t df = (x->dl_len << 8) - xs.d_cur, f, a, b, e;
+            uint32_t age, p;
             xs.d_cur += (df >> 11) + (df > 0) - (df < 0);   /* a new TIME glides, as tape would */
-            p = (int32_t)xs.dw - (xs.d_cur >> 8); f = xs.d_cur & 255;
-            a = dly_buf[(uint32_t)p & (DLY_LEN - 1u)]; b = dly_buf[(uint32_t)(p - 1) & (DLY_LEN - 1u)];
+            age = (uint32_t)xs.d_cur >> 8; p = xs.dw-age; f = xs.d_cur & 255;
+            a = age <= xs.dv ? dly_buf[p & (DLY_LEN-1u)] : 0;
+            b = age+1u <= xs.dv ? dly_buf[(p-1u) & (DLY_LEN-1u)] : 0;
             e = a + (((b - a) * f) >> 8);
             xs.d_lp += ((e - xs.d_lp) * x->dl_tone) >> 15;
             dly_buf[xs.dw & (DLY_LEN - 1u)] =
                 (int16_t)sat16(((l[i] + r[i]) >> 9) + ((xs.d_lp * x->dl_fb) >> 15));
             xs.dw++;
+            if (xs.dv < DLY_LEN) xs.dv++;
             e = (xs.d_lp * x->dl_mix) >> 7;     /* Q15 by Q15, out as Q23 */
             l[i] += e;
             r[i] += e;
         }
     }
     if (!(x->on & 1u << FX_REV)) {
+        xs.pv = 0;
         for (k = 0; k < 4u; k++)
-            xs.lp[k] = 0;
+            { xs.lp[k] = 0; xs.lv[k] = xs.av[k] = 0; }
     } else {
         for (i = 0; i < DX_N; i++) {
             int32_t v, o[4], h[4], ol, or_;
             uint32_t base = 0;
             pre_buf[xs.pw & (PRE_LEN - 1u)] = sat24((l[i] >> 2) + (r[i] >> 2));
-            v = pre_buf[(xs.pw - (uint32_t)x->rv_pre) & (PRE_LEN - 1u)];
+            if (xs.pv < PRE_LEN) xs.pv++;
+            v = (uint32_t)x->rv_pre < xs.pv ? pre_buf[(xs.pw-(uint32_t)x->rv_pre) & (PRE_LEN-1u)] : 0;
             xs.pw++;
             for (k = 0; k < 4u; k++) {          /* the diffusers: allpasses, g = 5/8 */
-                int32_t d = rv_ap[base + xs.ai[k]], t = v + ((d * 5) >> 3);
+                int32_t d = xs.av[k] >= RV_AP[k] ? rv_ap[base+xs.ai[k]] : 0, t = v+((d*5) >> 3);
                 v = d - ((t * 5) >> 3);
                 rv_ap[base + xs.ai[k]] = t;
+                if (xs.av[k] < RV_AP[k]) xs.av[k]++;
                 if (++xs.ai[k] >= RV_AP[k]) xs.ai[k] = 0;
                 base += RV_AP[k];
             }
             base = 0;
             for (k = 0; k < 4u; k++) {          /* each line, out, and its walls */
-                o[k] = rv_line[base + xs.li[k]];
+                o[k] = xs.lv[k] >= RV_LEN[k] ? rv_line[base+xs.li[k]] : 0;
                 xs.lp[k] += (int32_t)(((int64_t)(o[k] - xs.lp[k]) * x->rv_damp) >> 15);
                 base += RV_LEN[k];
             }
@@ -1103,6 +1196,7 @@ static void fx_run(const fx_t *x, int32_t *l, int32_t *r)
             for (k = 0; k < 4u; k++) {
                 int32_t w = v + (int32_t)(((int64_t)h[k] * x->rv_g[k]) >> 15);
                 rv_line[base + xs.li[k]] = w > 33554431 ? 33554431 : w < -33554431 ? -33554431 : w;
+                if (xs.lv[k] < RV_LEN[k]) xs.lv[k]++;
                 if (++xs.li[k] >= RV_LEN[k]) xs.li[k] = 0;
                 base += RV_LEN[k];
             }
@@ -1167,6 +1261,8 @@ static void hb_down(int32_t *x)                 /* x[2 * DX_N] at 88.2 kHz, the 
         hb_x[i] = hb_x[2u * DX_N + i];
 }
 
+static void fm_midi_prepare(flt_t *filter, fx_t *effects);
+
 static void app_audio(int32_t *out, uint32_t n)
 {
     static int32_t mono[2 * DX_N], one[2 * DX_N];
@@ -1176,28 +1272,45 @@ static void app_audio(int32_t *out, uint32_t n)
     static uint32_t sr_acc;                     /* ..and how far the slow clock is to its next tick */
     uint32_t hz = sr_hz;
     flt_t ft = fbuf[fcur];
-    const fx_t *xf = &xbuf[xcur];
+    fx_t live_effects;
+    const fx_t *xf = &live_effects;
     const play_t *pq = &plbuf[plcur];
-    uint32_t b, v, i, lit = 0, us, t0 = fm1_ticks();
-    uint32_t ge = !genv_idle();                 /* is the global envelope worth the multiply? */
+    uint32_t b, v, i, lit = 0, peak = 0, t0 = fm1_ticks(), tick, start;
+    cpu_profile_t parts = {0};
+    uint32_t ge;
     uint32_t os = os_want ? 1u : 0u, m = DX_N << os, lg = DX_LG_N + os;
-    int32_t g0;
+    int32_t g0, controller_pitch;
 
+    cpu_reset_pending();
+    mi_audio_sync(); fm_midi_prepare(&ft,&live_effects);
     ev_drain();
+    if (midi_silence) {
+        dc_x = dc_y = f_ic1 = f_ic2 = sr_held = 0; sr_acc = 0;
+        memset(hb_x,0,sizeof hb_x); memset(&xs,0,sizeof xs);
+        xs.ph_a = PH_A[PH_LO >> 8];
+        memset(sq_left,0,sizeof sq_left); arp_note = 0xFFu; clk_a = 0;
+        midi_silence = 0;
+    }
     if (!ft.type)                               /* off is off: nothing kept to ring when it comes back */
         f_ic1 = f_ic2 = 0;
     if (os && !dx_os)                           /* switched on: no stale history to play out */
         for (i = 0; i < HB_H; i++)
             hb_x[i] = 0;
     dx_os = (uint8_t)os;
+    tick = fm1_ticks(); parts.control = tick-t0;
 
     for (b = 0; b < n; b += DX_N) {
+        mi_tick(DX_N); fm_midi_prepare(&ft,&live_effects);
+        ge = !genv_idle(); controller_pitch = mi_pitch()*65536/12;
         pl_tick(pq);                            /* the arpeggiator and the phrase, on the block */
+        start = fm1_ticks(); parts.control += start-tick;
         for (i = 0; i < m; i++)
             mono[i] = 0;
         for (v = 0; v < NV; v++) {
             if (!dxv[v].on)
                 continue;
+            dxv[v].bright = midi_brightness; dxv[v].controller_vibrato = midi_vibrato;
+            dxv[v].controller_bias = midi_bias; dxv[v].controller_mutes = opmute;
             /* the carriers are done, or the global envelope has closed over them: either way the
              * voice is free again. The envelope is always run, even when it is doing nothing, so
              * that turning it up under a held note finds it where the note left it. */
@@ -1209,7 +1322,7 @@ static void app_audio(int32_t *out, uint32_t n)
             }
             lit |= 1u << v;
             if (!ge) {
-                dx_compute(&dxv[v], mono, 0);
+                dx_compute(&dxv[v], mono, controller_pitch);
                 continue;
             }
             {   /* one voice on its own, then faded in as it is added. The gain is interpolated
@@ -1218,7 +1331,7 @@ static void app_audio(int32_t *out, uint32_t n)
                 int32_t g = g0 << lg, dg = (genv[v].g >> 12) - g0;
                 for (i = 0; i < m; i++)
                     one[i] = 0;
-                dx_compute(&dxv[v], one, 0);
+                dx_compute(&dxv[v], one, controller_pitch);
                 for (i = 0; i < m; i++) {
                     mono[i] += ((one[i] >> 8) * (g >> lg)) >> 4;
                     g += dg;
@@ -1230,6 +1343,7 @@ static void app_audio(int32_t *out, uint32_t n)
         else
             for (i = 0; i < DX_N; i++)
                 mono[i] >>= OUT_SHIFT - 8;      /* Q23: the 8 bits under Q15 are kept */
+        tick = fm1_ticks(); parts.synth += tick-start; start = tick;
         for (i = 0; i < DX_N; i++) {
             int32_t s = mono[i];
             /* a ~34 Hz high pass. The feedback truncates towards zero: >> would floor it, and a
@@ -1271,11 +1385,9 @@ static void app_audio(int32_t *out, uint32_t n)
                 sp_feed(y >> 8);                /* the analyser's tap, before the effects: Q15 */
             mono[i] = y;
         }
-        if (xf->on)
-            fx_run(xf, mono, one);              /* `one` is free once the voices are summed */
-        if (!xf->on)
-            for (i = 0; i < DX_N; i++)
-                one[i] = mono[i];
+        tick = fm1_ticks(); parts.post += tick-start; start = tick;
+        fx_run(xf,mono,one);
+        tick = fm1_ticks(); parts.fx += tick-start; start = tick;
         for (i = 0; clk_a > 0 && i < DX_N; i++) {   /* the click, after everything: not reverberated,
                                                      * and not in the analyser or the scope */
             int32_t c = clk_ph >> 31 ? clk_a : -clk_a;     /* (Q8 of Q15 is Q23) */
@@ -1284,24 +1396,30 @@ static void app_audio(int32_t *out, uint32_t n)
             clk_ph += clk_inc;
             clk_a -= CLK_A0 / CLK_LEN;
         }
+        for (i = 0; i < DX_N; i++) mi_stereo(&mono[i],&one[i]);
         if (out_mono)                           /* a mono plug hears the tip, the left: give it both
                                                  * sides, halved, so a centred sound keeps its level */
             for (i = 0; i < DX_N; i++)
                 mono[i] = one[i] = (mono[i] + one[i]) >> 1;
         for (i = 0; i < DX_N; i++) {
+            {
+                uint32_t l = (uint32_t)(mono[i] < 0 ? -mono[i] : mono[i]);
+                uint32_t r = (uint32_t)(one[i] < 0 ? -one[i] : one[i]);
+                if (l > peak) peak = l;
+                if (r > peak) peak = r;
+            }
             out[2u * (b + i)] += mono[i];
             out[2u * (b + i) + 1u] += one[i];
         }
+        tick = fm1_ticks(); parts.post += tick-start;
     }
     v_lit = lit;
+    if (!lit && peak < 256u && ev_r == ev_w) {
+        if (midi_quiet_blocks < 20u) midi_quiet_blocks++;
+    } else midi_quiet_blocks = 0;
 
-    us = (fm1_ticks() - t0) / FM1_TICKS_PER_US;
-    if (us * 100u / BUDGET_US > cpu_peak)
-        cpu_peak = us * 100u / BUDGET_US;
-    cpu_q8 = (cpu_q8 * 15u + us * 256u / BUDGET_US) / 16u;
-    cpu_over = (uint8_t)(cpu_over << 1 | (us * 100u > BUDGET_US * 85u));
-    if ((cpu_over & 3u) == 3u)                  /* two blocks in a row over 85 %: we are not keeping up */
-        v_shed();
+    start = fm1_ticks(); parts.post += start-tick;
+    cpu_report(start-t0,&parts);
 }
 
 /* ---- the parameters under the knobs.
@@ -1365,6 +1483,8 @@ enum { UI_SPAN = 0, UI_GATK, UI_GDEC, UI_GSUS, UI_GREL, UI_FCUT, UI_FRES, UI_FTY
 #define PLAY_DEFAULTS 40, 0, 0, 0, 0, 0, 0       /* 120 BPM, UP, one octave, unlatched; 1 bar, 1/16, no click */
 #define PLAY2_DEFAULTS 59, 3, 0, 78             /* 60 %, 1/16, straight, velocity 100 */
 static uint8_t ui[UI_N] = {2, 0, 50, 99, 99, 60, 0, 0, FX_DEFAULTS, 1, PLAY_DEFAULTS, PLAY2_DEFAULTS};
+static uint8_t midi_ui[2][UI_N];
+static volatile uint32_t midi_ui_index;
 enum { FT_OFF = 0, FT_LP, FT_BP, FT_HP };
 
 /* The ISR's copy of the global envelope. Called once a pass rather than at each of the places a
@@ -1374,13 +1494,22 @@ enum { FT_OFF = 0, FT_LP, FT_BP, FT_HP };
  * Switched off, the ISR is handed the envelope that does nothing -- instant attack, full sustain,
  * no release -- which genv_idle recognises and skips, so off costs what it did before there was
  * one. The four knobs keep their places, so on again is the shape you left. */
+static int fm_midi_dispatch(uint32_t st, uint32_t d1, uint32_t d2);
 static void glo_sync(void)
 {
     static const uint8_t NONE[G_N] = {0, 50, 99, 99};
+    static uint32_t channel;
     uint32_t i;
+    if (channel != ui[UI_MCH]) {
+        channel = ui[UI_MCH];
+        fm_midi_dispatch(0xB0u+(channel ? channel-1u : 0u),120,0);
+        mi_reset_input(); mi_publish(); ev_push(EV_SUSTAIN,0,0);
+    }
     for (i = 0; i < G_N; i++)
         gpar[i] = ui[UI_GOFF] ? NONE[i] : ui[UI_GATK + i];
     dx_peg_off = ui[UI_POFF];                   /* and the pitch envelope's switch, likewise */
+    memcpy(midi_ui[midi_ui_index ^ 1u],ui,sizeof ui);
+    RING_PUBLISH(); midi_ui_index ^= 1u;
 }
 
 /* ---- the filter
@@ -1476,54 +1605,42 @@ static uint32_t udiv64_32(uint64_t n, uint32_t d)
 
 /* The ISR's coefficients, worked out again whenever one of the three bytes has moved:
  * a1 = 1 / (1 + g (g + k)), a2 = g a1, a3 = g a2, all Q30. */
+static void flt_config(flt_t *f, uint32_t c, uint32_t r, uint32_t t)
+{
+    uint32_t ci = c >> 8, ri = r >> 8, g, k, d, a1, a2;
+    g = FLT_G[ci]; k = FLT_K[ri];
+    if (ci < 99u) g += (uint32_t)(((int64_t)(FLT_G[ci+1u]-g)*(c & 255u)) >> 8);
+    if (ri < 99u) k = (uint32_t)((int32_t)k+
+        (int32_t)(((int64_t)((int32_t)FLT_K[ri+1u]-(int32_t)k)*(r & 255u)) >> 8));
+    d = (1u << 24)+(uint32_t)(((uint64_t)g*(g+k)) >> 32);
+    a1 = udiv64_32(1ull << 54,d);
+    a2 = (uint32_t)(((uint64_t)g*a1) >> 28);
+    f->a1 = (int32_t)a1; f->a2 = (int32_t)a2;
+    f->a3 = (int32_t)(((uint64_t)g*a2) >> 28);
+    f->k = (int32_t)(k << 2); f->type = t;
+}
+
 static void flt_sync(void)
 {
     static uint32_t had = ~0u;
     uint32_t c = ui[UI_FCUT] < 100u ? ui[UI_FCUT] : 99u, r = ui[UI_FRES] < 100u ? ui[UI_FRES] : 99u;
-    uint32_t t = ui[UI_FTYPE] & 3u, now = c | r << 8 | t << 16, g, k, d, a1, a2;
-    flt_t *f;
+    uint32_t t = ui[UI_FTYPE] & 3u, now = c | r << 8 | t << 16;
     if (now == had)
         return;
     had = now;
-    g = FLT_G[c];
-    k = FLT_K[r];
-    d = (1u << 24) + (uint32_t)(((uint64_t)g * (g + k)) >> 32);     /* Q24 */
-    a1 = udiv64_32(1ull << 54, d);
-    a2 = (uint32_t)(((uint64_t)g * a1) >> 28);
-    f = &fbuf[fcur ^ 1u];
-    f->a1 = (int32_t)a1;
-    f->a2 = (int32_t)a2;
-    f->a3 = (int32_t)(((uint64_t)g * a2) >> 28);
-    f->k = (int32_t)(k << 2);
-    f->type = t;
+    flt_config(&fbuf[fcur ^ 1u],c*256u,r*256u,t);
     fcur ^= 1u;
 }
 
 /* The effects' sixteen bytes, as the ISR wants them. An effect coming on has its lines cleared
  * first, so it never plays back what it held the last time it was on: the ISR does not touch an
  * effect that is off, and runs only while this does not, so the clear cannot race it. */
-static void fx_sync(void)
+static void fx_config(fx_t *x, const uint8_t u[16])
 {
-    static uint8_t had[4 * FX_N];
-    static uint32_t on;
-    const uint8_t *u = &ui[UI_FX];
     uint32_t k, now = 0;
-    fx_t *x;
-    if (!memcmp(had, u, sizeof had))
-        return;
-    memcpy(had, u, sizeof had);
     for (k = 0; k < FX_N; k++)
         if (u[4u * k])
             now |= 1u << k;
-    if (now & ~on & 1u << FX_CHO) memset(cho_buf, 0, sizeof cho_buf);
-    if (now & ~on & 1u << FX_DLY) memset(dly_buf, 0, sizeof dly_buf);
-    if (now & ~on & 1u << FX_REV) {
-        memset(pre_buf, 0, sizeof pre_buf);
-        memset(rv_line, 0, sizeof rv_line);
-        memset(rv_ap, 0, sizeof rv_ap);
-    }
-    on = now;
-    x = &xbuf[xcur ^ 1u];
     x->on = now;
     x->ch_mix = u[0] * 16384 / 99;              /* the two that add a copy: 99 is half and half,
                                                  * which is as deep as a notch or a beat goes */
@@ -1543,7 +1660,59 @@ static void fx_sync(void)
         x->rv_g[k] = RV_G[u[13] * 4u + k];
     x->rv_damp = RV_DAMP[u[14]];
     x->rv_pre = u[15] * 441 / 10;
-    xcur ^= 1u;
+}
+
+static void fx_sync(void)
+{
+    static uint8_t had[16];
+    if (!memcmp(had,&ui[UI_FX],sizeof had)) return;
+    memcpy(had,&ui[UI_FX],sizeof had);
+    fx_config(&xbuf[xcur ^ 1u],had); xcur ^= 1u;
+}
+
+static void fm_midi_prepare(flt_t *filter, fx_t *effects)
+{
+    static flt_t live_filter;
+    static uint32_t filter_key = ~0u;
+    uint8_t fx_values[16];
+    const uint8_t *u = midi_ui[midi_ui_index];
+    static const uint8_t none[G_N] = {0,50,99,99};
+    uint32_t i, c, r, key;
+    memcpy(midi_voice,pbuf[pcur],sizeof midi_voice);
+    for (i = 0; i < 6u; i++) {
+        uint32_t op = 5u-i, at = op*21u;
+        midi_voice[at+16u] = (uint8_t)mi_value(13u+i,midi_voice[at+16u],0,99);
+        midi_voice[at+18u] = (uint8_t)mi_value(19u+i,midi_voice[at+18u],0,31);
+        midi_voice[at+19u] = (uint8_t)mi_value(25u+i,midi_voice[at+19u],0,99);
+        if (opmute >> op & 1u) midi_voice[at+16u] = midi_voice[at+9u] = midi_voice[at+10u] = 0;
+    }
+    midi_voice[135] = (uint8_t)mi_value(31,midi_voice[135],0,7);
+    midi_voice[137] = (uint8_t)mi_value(32,midi_voice[137],0,99);
+    midi_voice[139] = (uint8_t)mi_value(33,midi_voice[139],0,99);
+    midi_voice[140] = (uint8_t)mi_value(34,midi_voice[140],0,99);
+    if (memcmp(midi_voice_seen,midi_voice,sizeof midi_voice)) {
+        for (i = 0; i < NV; i++)
+            if (dxv[i].on) dx_update(&dxv[i],midi_voice,tnote(vst[i].note),vst[i].vel);
+        memcpy(midi_voice_seen,midi_voice,sizeof midi_voice);
+    }
+    midi_brightness = mi_value(MI_BRIGHTNESS,0,-65536,65536)*1024;
+    midi_vibrato = mi_value(MI_VIBRATO,0,-256,256)*65536/12;
+    midi_bias = mi_value(51,0,-65536,65536)*512;
+    for (i = 0; i < G_N; i++)
+        g_live[i] = u[UI_GOFF] ? none[i] : (uint8_t)mi_value(35u+i,u[UI_GATK+i],0,99);
+    c = (uint32_t)mi_value(MI_CUTOFF,u[UI_FCUT]*256,0,99*256);
+    r = (uint32_t)mi_value(MI_RESONANCE,u[UI_FRES]*256,0,99*256);
+    key = c | r << 15 | (u[UI_FTYPE] & 3u) << 30;
+    if (key != filter_key) { flt_config(&live_filter,c,r,u[UI_FTYPE]); filter_key = key; }
+    *filter = live_filter;
+    for (i = 0; i < 16u; i++) fx_values[i] = (uint8_t)mi_value(fm_midi_fx_targets[i],u[UI_FX+i],0,99);
+    fx_config(effects,fx_values);
+    effects->ch_mix = mi_value(MI_CHORUS,u[UI_FX]*16384/99,0,16384);
+    effects->ph_mix = mi_value(MI_PHASER,u[UI_FX+4u]*16384/99,0,16384);
+    effects->dl_mix = mi_value(MI_DELAY,u[UI_FX+8u]*32767/99,0,32767);
+    effects->rv_mix = mi_value(MI_REVERB,u[UI_FX+12u]*32767/99,0,32767);
+    effects->on = (effects->ch_mix ? 1u : 0u) | (effects->ph_mix ? 2u : 0u) |
+                  (effects->dl_mix ? 4u : 0u) | (effects->rv_mix ? 8u : 0u);
 }
 
 /* What the filter does to a frequency, for drawing it. The filter is the analogue one put through
@@ -1731,6 +1900,8 @@ static const param_t PG_GLO[] = {
     {"OUTPUT",       "OUTPUT", P_UI, UI_OUT,  1, K_STEREO},
 };
 #define PG_GLO_FB 1u                            /* reached by name: HOME has a knob for it */
+#define PG_GLO_SRATE 14u
+#define GLO_DIAGNOSTICS_BANK ((sizeof PG_GLO / sizeof PG_GLO[0] + 3u) / 4u)
 /* ..and the same eight as the PIT key gives them: a rate with the level it is heading for, the way
  * the ENVELOPE page pairs an operator's, so the first four are the note's start and the second its
  * end. A level of 50 is the note's own pitch. */
@@ -2068,7 +2239,13 @@ static uint32_t page_nbank(void)
     uint32_t b = 0, i = 0, n = page_n();
     while (i < n && b < 32u)
         i += bank_rows(b++);
+    if (page == PAGE_GLO) b++;
     return b ? b : 1u;
+}
+
+static int glo_diagnostics(void)
+{
+    return page == PAGE_GLO && bank == GLO_DIAGNOSTICS_BANK;
 }
 
 /* ---- the four knobs on HOME
@@ -2380,6 +2557,7 @@ static void rat_free(uint32_t op, int32_t dir)
  * The HOME knobs drive this for an operator you are not editing, so it takes one. */
 static void rat_turn(uint32_t op, int32_t enc)
 {
+    mi_panel_target(19u+5u-op); mi_panel_target(25u+5u-op);
     if (*op_byte(op, 17)) {                     /* FIXED: walk the four decades in steps */
         int32_t x = (int32_t)fix_step(op) + enc;
         x = x < 0 ? 0 : x > 399 ? 399 : x;
@@ -2403,8 +2581,30 @@ static void rat_turn(uint32_t op, int32_t enc)
 /* Move one parameter by one knob's worth, wherever the knob happened to be. The focus knobs and
  * the knobs on a page are the same four knobs on the same bytes, so they must also be the same
  * arithmetic -- including the two rows that write a second byte with the first. */
+static void fm_midi_touch(const param_t *p)
+{
+    uint32_t target = MI_NONE;
+    if (p->where == P_UI) {
+        if (p->idx >= UI_FX && p->idx < UI_FX+16u) target = fm_midi_fx_targets[p->idx-UI_FX];
+        else if (p->idx >= UI_GATK && p->idx <= UI_GREL) target = 35u+p->idx-UI_GATK;
+        else if (p->idx == UI_FCUT) target = MI_CUTOFF;
+        else if (p->idx == UI_FRES) target = MI_RESONANCE;
+    } else if (p->where == P_OP) {
+        if (p->idx == 16u) target = 13u+5u-opsel;
+        else if (p->idx == 18u) target = 19u+5u-opsel;
+        else if (p->idx == 19u) target = 25u+5u-opsel;
+    } else {
+        if (p->idx == 135u) target = 31;
+        else if (p->idx == 137u) target = 32;
+        else if (p->idx == 139u) target = 33;
+        else if (p->idx == 140u) target = 34;
+    }
+    mi_panel_target(target);
+}
+
 static void p_turn(const param_t *p, int32_t enc)
 {
+    fm_midi_touch(p);
     int32_t v;
     if (p->kind == K_RAT) {
         rat_turn(opsel, enc);
@@ -3380,12 +3580,21 @@ static void draw_eg(const dx_env_t *e, const dx_env_t *live, uint32_t seg)
  * A stage switched off is drawn flat rather than wide: DECAY OFF stays at full and the sustain
  * line is not where the note goes, RELEASE OFF runs level off the right-hand edge, which is the
  * picture of a note this envelope has stopped having an opinion about. */
+static int32_t g_plot_ratio(int32_t value, uint32_t width, uint32_t denominator)
+{
+    /* Q24 gains times a <=232-pixel span fit unsigned 32 bits, not signed 32 bits. */
+    uint32_t magnitude = (uint32_t)(value < 0 ? -value : value);
+    int32_t pixels = (int32_t)(magnitude*width/denominator);
+    return value < 0 ? -pixels : pixels;
+}
+
 static void draw_geg(int32_t y, int32_t h)
 {
     const int32_t x0 = 4, x1 = 236, hold = 40;
     int32_t top = 2, bot = h - 3, sy, wa, wd, wr, xa, xd, xh;
     uint32_t ta = ui[UI_GATK], td = ui[UI_GDEC], tr = ui[UI_GREL], tot;
     uint32_t sus = ui[UI_GSUS];
+    int32_t live_sus = g_sus();                /* one snapshot: audio may change it between UI reads */
     uint32_t dof = td >= 99u, rof = tr >= 99u || tr == 0u;   /* nowhere to fall, either end */
     uint32_t off = ui[UI_GOFF];                 /* switched out: the shape kept, in grey */
     uint16_t c = off ? RGB(70, 70, 85) : C_ACC;
@@ -3423,12 +3632,12 @@ static void draw_geg(int32_t y, int32_t h)
             if (genv[v].st == GS_ATK)
                 px = x0 + (int32_t)(((int64_t)g * wa) >> 24);
             else if (genv[v].st == GS_DEC)
-                px = (g_sus() >= G_ONE) ? xd
-                   : xa + (int32_t)(((int64_t)(G_ONE - g) * wd) / (G_ONE - g_sus()));
+                px = (live_sus >= G_ONE) ? xd
+                   : xa + g_plot_ratio(G_ONE-g,(uint32_t)wd,(uint32_t)(G_ONE-live_sus));
             else if (rof)
                 px = xh + wr;
-            else if (g_sus() > 0)
-                px = xh + (int32_t)(((int64_t)(g_sus() - g) * wr) / g_sus());
+            else if (live_sus > 0)
+                px = xh + g_plot_ratio(live_sus-g,(uint32_t)wr,(uint32_t)live_sus);
             if (px < x0) px = x0;
             if (px > x1) px = x1;
             cv_rect(px - 1, py - 1, 3, 3, C_WHITE);
@@ -3913,6 +4122,52 @@ static void draw_head(void)
 #define LEGEND_Y 208u
 #define STATUS_Y 224u
 
+static void draw_diagnostics(uint32_t voices)
+{
+    static const char *const names[] = {"CPU","PEAK","SAMPLE RATE","BUILD"};
+    char text[64];
+    uint32_t i, n;
+#ifndef DINGHY_HOST
+    cpu_profile_t parts = cpu_profiles[cpu_profile_index];
+#endif
+    cv_begin(240,72,C_BLACK);
+#ifdef DINGHY_HOST
+    cv_text(4,0,&FONT_S,"HOST / NO DEVICE TIMING",C_LBL);
+    n = putn(text,put(text,0,"VOICES "),voices,1);
+    text[put(text,n," / 8")] = 0;
+    cv_text(4,18,&FONT_S,text,C_WHITE);
+    cv_text(4,36,&FONT_S,"LATE: NOT DEVICE",C_WHITE);
+#else
+    n = putn(text,put(text,0,"PK SYN "),parts.synth,1);
+    n = putn(text,put(text,n,"% FX "),parts.fx,1); text[put(text,n,"%")] = 0;
+    cv_text(4,0,&FONT_S,text,C_LBL);
+    n = putn(text,put(text,0,"CTL "),parts.control,1);
+    n = putn(text,put(text,n,"% POST "),parts.post,1); text[put(text,n,"%")] = 0;
+    cv_text(4,18,&FONT_S,text,C_WHITE);
+    n = putn(text,put(text,0,"VOICES "),voices,1);
+    text[putn(text,put(text,n," / 8  LATE "),cpu_late,1)] = 0;
+    cv_text(4,36,&FONT_S,text,C_WHITE);
+#endif
+    cv_text(4,54,&FONT_S,"SEL: RESET PEAK / LATE",C_LBL);
+    cv_blit(0,44);
+    for (i = 0; i < 4u; i++) {
+        if (i < 2u) {
+#ifdef DINGHY_HOST
+            n = put(text,0,"NOT DEVICE");
+#else
+            n = putn(text,0,i ? parts.percent : cpu_q8*100u/256u,1);
+            n = put(text,n,"%");
+#endif
+        } else if (i == 2u) n = putval(text,0,&PG_GLO[PG_GLO_SRATE],ui[UI_SRATE]);
+        else n = put(text,0,APP_VER);
+        text[n] = 0;
+        cv_begin(240,16,C_BLACK);
+        cv_text(8,0,&FONT_S,names[i],C_LBL);
+        cv_text(234-text_w(&FONT_S,text),0,&FONT_S,text,C_WHITE);
+        cv_blit(0,120u+i*16u);
+    }
+}
+
 static void draw_legend(void)
 {
     uint32_t e;
@@ -4011,6 +4266,12 @@ static void draw_corners(void)
 
 static void draw_status(int32_t oct, uint32_t nv, uint32_t cpu, uint32_t pk)
 {
+#ifdef DINGHY_HOST
+    if (glo_diagnostics()) {
+        draw_text_box(0,STATUS_Y,240,&FONT_S,"HOST / NOT DEVICE TIMING",C_OFF,1);
+        return;
+    }
+#endif
     char s[32];
     uint32_t i = put(s, 0, "OCT");
     s[i++] = oct < 0 ? '-' : '+';
@@ -4496,8 +4757,10 @@ typedef struct { int8_t oct; uint8_t voice; uint8_t slot; uint8_t mono; uint8_t 
                  uint8_t srate;                 /* SR_OS less the step, so 0, the default, is 88.2K. `os`
                                                  * is still written, for whether that is 88.2K: a store
                                                  * from before has only that, and its OFF was 44.1K */
+                 mi_config_t midi;
                } settings_t;
-typedef char fmlab_settings_255[(sizeof(settings_t) <= 255u) ? 1 : -1];   /* the host keeps a byte of length */
+typedef char fmlab_settings_512[(sizeof(settings_t) <= 512u) ? 1 : -1];
+#define FM_LEGACY_SETTINGS_BYTES (offsetof(settings_t,srate)+1u)
 #define PL_MARK 0xA5u                           /* the play block is this one: an earlier layout is ignored */
 
 /* The instrument's own bytes have moved: into the settings with them. A new span also drops the
@@ -4505,6 +4768,7 @@ typedef char fmlab_settings_255[(sizeof(settings_t) <= 255u) ? 1 : -1];   /* the
 static void set_take(settings_t *set)
 {
     uint32_t k;
+    set->midi = mi_config;
     for (k = 0; k < G_N; k++)
         set->genv[k] = ui[UI_GATK + k];
     for (k = 0; k < 3u; k++)
@@ -4534,13 +4798,53 @@ static void set_take(settings_t *set)
     }
 }
 
+static int fm_midi_dispatch(uint32_t st, uint32_t d1, uint32_t d2)
+{
+    uint32_t kind = st & 0xF0u;
+    int action;
+    if (st >= 0xF0u || (ui[UI_MCH] && (st & 15u)+1u != ui[UI_MCH])) return MI_CONTROL;
+    if (d1 > 127u || (kind != 0xC0u && kind != 0xD0u && d2 > 127u)) {
+        say("INVALID MIDI"); mi_invalid(); return MI_CONTROL;
+    }
+    if (kind == 0x90u && d2) { sp_note = (uint8_t)d1; ev_push(EV_ON,d1,d2); return MI_CONTROL; }
+    if (kind == 0x80u || kind == 0x90u) { ev_push(EV_OFF,d1,0); return MI_CONTROL; }
+    action = mi_receive(kind,d1,d2);
+    if (action == MI_PEDAL) ev_push(EV_SUSTAIN,d2 >= 64u,0);
+    else if (action == MI_RESET) ev_push(EV_SUSTAIN,0,0);
+    else if (action == MI_SOUND_OFF || action == MI_NOTES_OFF) {
+        if (rec) rec_stop();
+        seq_run = arp_on = 0; chord_n = 0; arpkeys = rkeys = 0;
+        pl_sync(); ev_push(action == MI_SOUND_OFF ? EV_SILENCE : EV_RELEASE_ALL,0,0);
+    } else if (action == MI_LEARNED) say("CC LEARNED");
+    else if (action == MI_RESERVED) { say("RESERVED CC"); mi_learn = 0; mi_drawn = ~0u; }
+    return action;
+}
+
+static int fm_settings_write(const settings_t *set)
+{
+    settings_t verify;
+    uint32_t n = mi_default_config(&set->midi) ? FM_LEGACY_SETTINGS_BYTES : sizeof *set;
+    int rc;
+    memcpy(&verify,set,sizeof verify);
+    rc = settings_save(set,n);
+    if (!rc) rc = settings_load(&verify,sizeof verify);
+    if (!rc && (settings_loaded_length != n || memcmp(set,&verify,sizeof verify))) rc = -1;
+    return rc;
+}
+
+static int fm_settings_midi_valid(const settings_t *set)
+{
+    return mi_valid(&set->midi) && (settings_loaded_length <= FM_LEGACY_SETTINGS_BYTES ||
+           settings_loaded_length == sizeof *set);
+}
+
 static void app_main(void)
 {
     settings_t set = {0, 0, 0, 0, 2, 0, {0, 50, 99, 99}, {60, 0, 0}, {FX_DEFAULTS}, 1,
                       PL_MARK, {PLAY_DEFAULTS}, 0, {{0, 0, 0}}, {PLAY2_DEFAULTS}, 0, 0, 1, 1, 0, 0, 0, 0};
     uint32_t prev = 0, k, t_change = 0, dirty = 0, t_meter = 0, repaint = 1, repaint_meter = 1;
     uint32_t sounding = 0;                      /* keys that really started a note: a page change must not strand one */
-    uint32_t t_live = 0, eg_dirty = 1, eg_live = 0;
+    uint32_t t_live = 0, eg_dirty = 1, eg_live = 0, t_diagnostics = 0, diagnostics_fresh = 1;
     uint32_t nv_drawn = ~0u, cpu_drawn = ~0u, pk_drawn = ~0u;
     uint64_t vkey_drawn = ~0ull;
     uint16_t voice;                             /* where in the voice list: factory, then U1-01 .. U8-32 */
@@ -4553,6 +4857,7 @@ static void app_main(void)
     uint32_t t_hold[FOC_N] = {0, 0, 0, 0}, long_fired[FOC_N] = {0, 0, 0, 0};  /* how long each is down */
     uint32_t t_rec = 0, rec_long = 0;           /* REC: a tap or a hold */
     uint32_t t_seq = 0, seq_long = 0;           /* SEQ: likewise -- the knobs, or the step view */
+    uint32_t t_midi = 0, midi_long = 0, midi_rejected = 0;
     uint32_t t_aud = 0;                         /* the step view: when the cursor's notes began */
     uint8_t aud[8], aud_n = 0, stc_was = 0;
     uint8_t latch_was;
@@ -4560,7 +4865,10 @@ static void app_main(void)
     uint32_t lfo_sig_drawn = ~0u;               /* the LFO picture on HOME follows its own bytes */
 
     bank_init();                                /* before the first load_voice: a slot may be the voice */
+    mi_init(); set.midi = mi_config;
     settings_load(&set, sizeof set);
+    if (fm_settings_midi_valid(&set)) { mi_config = set.midi; mi_publish(); }
+    else { midi_rejected = 1; set.midi = mi_config; }
     voice = (uint16_t)(set.voice + 256u * set.voice_hi);
     if (set.oct < -2 || set.oct > 2) set.oct = 0;
     if (voice >= NVOICE) voice = 0;
@@ -4616,6 +4924,7 @@ static void app_main(void)
     memcpy(pbuf[pcur ^ 1u], edit, DX_VSZ);         /* both halves valid before the ISR ever reads one */
 
     lcd_fill(0, 0, 240, 240, C_BLACK);
+    if (midi_rejected) say("MIDI DATA REJECTED");
 
     for (;;) {
         uint32_t keys, down, up, rel, b, lit = 0, nv = 0, e;
@@ -4639,15 +4948,15 @@ static void app_main(void)
         prev = keys;
         for (k = 0; k < 27u; k++) {             /* a key stops the note it started: the octave may change */
             if (down >> k & 1u) {
-                int fn = op_key(k);
+                int fn = mi_editor ? -1 : op_key(k);
                 if (fn >= 0) {
                     opsel = (uint8_t)fn;        /* pointing at an operator, not playing one */
                     gsel = 0;
-                } else if (glo_point() && k == GLO_KEY) {
+                } else if (!mi_editor && glo_point() && k == GLO_KEY) {
                     gsel = 1;                   /* ..or at the envelope over all six of them */
                     bank = 0;
                     repaint = 1;
-                } else if (op_point() && k == PIT_KEY) {
+                } else if (!mi_editor && op_point() && k == PIT_KEY) {
                     gsel = 2;                   /* ..or at the one that bends the note's pitch */
                     if (page == PAGE_HOME)
                         focus = FOC_ENV;
@@ -4658,10 +4967,10 @@ static void app_main(void)
                     if (page == PAGE_EG)
                         bank = 0;
                     repaint = 1;
-                } else if (k == AB_KEY && ab_point()) {
+                } else if (!mi_editor && k == AB_KEY && ab_point()) {
                     ab_t = fm1_ms ? fm1_ms : 1u;    /* the compare: decided on the way up */
                     ab_long = 0;
-                } else if (op_point() && (k == MONO_KEY || k == POLY_KEY)) {
+                } else if (!mi_editor && op_point() && (k == MONO_KEY || k == POLY_KEY)) {
                     set.mono = k == MONO_KEY;
                     ev_push(EV_MONO, set.mono, 0);
                     say(set.mono ? "MONO" : "POLY");
@@ -4720,6 +5029,10 @@ static void app_main(void)
         }
 
         b = fm1_input_edges(&rel);
+        if (mi_editor && (b & ((1u << BTN_HOME) | (1u << BTN_EDIT) | (1u << BTN_ENV) |
+            (1u << BTN_LFO) | (1u << BTN_FX) | (1u << BTN_ARP) | (1u << BTN_SEQ)))) {
+            mi_editor = mi_learn = 0; page_drawn = 255;
+        }
         if (b && !(b & (1u << BTN_SAVE)) && b != 1u << BTN_SEL)
             saving = 0;                                    /* anything else backs out of the save --
                                                             * but SEL, the shift for PRESETS' banks */
@@ -4736,7 +5049,15 @@ static void app_main(void)
             } else
                 page_to(PAGE_HOME);
         }
-        if (b & (1u << BTN_GLO))  page_to(PAGE_GLO);
+        if (b & (1u << BTN_GLO)) {
+            if (mi_editor) mi_slot_turn(1);
+            else { page_to(PAGE_GLO); t_midi = fm1_ms ? fm1_ms : 1u; midi_long = 0; }
+        }
+        if (t_midi && !midi_long && fm1_ms-t_midi >= LONG_MS &&
+            ((fm1_in.buttons | rel) & (1u << BTN_GLO))) {
+            midi_long = 1; mi_open_editor(); saving = 0;
+        }
+        if (rel & (1u << BTN_GLO)) t_midi = 0;
         /* EDIT, ENV and LFO are the three buttons with a page whose top is worth having under the
          * knobs while you play, and they are the three that answer to how long you hold them. Held past LONG_MS: the page, and pressing again walks its
          * banks, exactly as every page button does -- a second hold is not needed, because once you
@@ -4804,14 +5125,19 @@ static void app_main(void)
          * for the release, because while it is down it is also the fine-adjust shift, and a knob
          * turned under it has spoken for the press -- so a hold cannot fire on the clock the way
          * the page buttons' do, or every fine adjustment would end in a solo. */
-        if (b & (1u << BTN_SEL)) {
+        if (b & (1u << BTN_SEL) && mi_editor) {
+            mi_toggle_learn(); sel_used = 1;
+        } else if (b & (1u << BTN_SEL)) {
             sel_used = saving;                             /* while saving it is only the shift */
             t_sel = fm1_ms;
             draw_legend();                                 /* the names go bright: a click is one */
         }
-        if (rel & (1u << BTN_SEL)) {
+        if ((rel & (1u << BTN_SEL)) && !mi_editor) {
             draw_legend();
-            if (!sel_used && (page != PAGE_HOME || foc_op())) {   /* plain HOME has no operator to pick */
+            if (!sel_used && glo_diagnostics()) {
+                cpu_request_reset(); diagnostics_fresh = repaint_meter = 1;
+                say("PEAK / LATE RESET");
+            } else if (!sel_used && (page != PAGE_HOME || foc_op())) {   /* plain HOME has no operator to pick */
                 if (fm1_ms - t_sel >= LONG_MS)
                     op_solo(opsel);                        /* only the selected operator */
                 else
@@ -4916,7 +5242,10 @@ static void app_main(void)
             t_change = fm1_ms;
         }
         if (b & (1u << BTN_SAVE)) {                        /* press to pick a slot, press again to write */
-            if (!saving) {
+            if (mi_editor) {
+                mi_clear();
+                set_take(&set); dirty = 1; t_change = fm1_ms;
+            } else if (!saving) {
                 saving = 1;
                 save_slot = set.slot;
                 name_begin();
@@ -4936,6 +5265,9 @@ static void app_main(void)
         }
 
         if ((enc = fm1_enc_take(ENC_PRESETS)) != 0) {      /* the voice, or the slot to save to */
+            if (mi_editor) {
+                if (mi_group_turn(enc)) { set_take(&set); dirty = 1; t_change = fm1_ms; }
+            } else {
             if (sel_fine())                                /* SEL held: a bank at a time */
                 sel_used = 1;
             if (saving) {
@@ -4952,9 +5284,12 @@ static void app_main(void)
                 dirty = 1;
                 t_change = fm1_ms;
             }
+            }
         }
         if ((enc = fm1_enc_take(ENC_SELECT)) != 0) {       /* the next four things under the knobs */
-            if (saving) {                                  /* or, while saving, which letter */
+            if (mi_editor) {
+                mi_slot_turn(enc);
+            } else if (saving) {                                  /* or, while saving, which letter */
                 int32_t c2 = (int32_t)save_cur + enc;
                 while (c2 < 0) c2 += 10;
                 save_cur = (uint8_t)(c2 % 10);
@@ -4962,7 +5297,10 @@ static void app_main(void)
                 sel_step(enc);
         }
         if ((enc = fm1_enc_take(ENC_ALGORITHM)) != 0) {    /* its own knob, on any page */
-            if (saving) {                                  /* or, while saving, what that letter is */
+            if (mi_editor) {
+                if (mi_target_turn(enc)) { set_take(&set); dirty = 1; t_change = fm1_ms; }
+            }
+            else if (saving) {                                  /* or, while saving, what that letter is */
                 int32_t c2 = (int32_t)name_ix(save_name[save_cur]) + enc;
                 while (c2 < 0) c2 += (int32_t)NAME_NCH;
                 save_name[save_cur] = NAME_CH[c2 % (int32_t)NAME_NCH];
@@ -4973,6 +5311,9 @@ static void app_main(void)
                 patch_publish();
             }
         }
+        if (mi_editor)
+            for (e = 0; e < 4u; e++)
+                if (mi_knob(e,fm1_enc_take(ENC_KNOB1+e))) { set_take(&set); dirty = 1; t_change = fm1_ms; }
         if (page == PAGE_FX)
             fxsel = bank;                       /* the page and the tap agree on which effect */
         if (page == PAGE_HOME && (focus != FOC_OFF || home_flt())) {   /* focused: four things about
@@ -5002,6 +5343,7 @@ static void app_main(void)
                     int32_t v;
                     if ((enc = knob_take(e, 1)) == 0)
                         continue;
+                    mi_panel_target(31);
                     v = (int32_t)edit[135] + enc;
                     edit[135] = (uint8_t)(v < 0 ? 0 : v > 7 ? 7 : v);
                     say_param(&PG_GLO[PG_GLO_FB]);
@@ -5013,6 +5355,7 @@ static void app_main(void)
                     continue;
                 op = 6u - n;                    /* the panel counts OP1 first, the voice OP6 */
                 if (HSET[homeset].what == HK_LVL) {
+                    mi_panel_target(13u+5u-op);
                     int32_t v = (int32_t)*op_byte(op, 16) + enc;
                     *op_byte(op, 16) = (uint8_t)(v < 0 ? 0 : v > 99 ? 99 : v);
                 } else
@@ -5062,12 +5405,17 @@ static void app_main(void)
                 ev_push(EV_OFF, aud[k], 0);
             aud_n = 0;
         }
+        if (glo_diagnostics())
+            for (e = 0; e < 4u; e++) {
+                if (fm1_enc_take(ENC_KNOB1+e) && sel_fine()) sel_used = 1;
+            }
         for (e = 0; e < bank_rows(bank); e++) {            /* KNOB1..n: the parameters on screen */
             uint32_t pi = bank_first(bank) + e;
             const param_t *p;
             int32_t v;
             if ((p = page_at(pi)) == 0 || (enc = knob_take(e, p_step(p))) == 0)
                 continue;
+            fm_midi_touch(p);
             if (p->kind == K_RAT) {
                 rat_turn(opsel, enc);
                 modified = 1;
@@ -5097,12 +5445,10 @@ static void app_main(void)
         }
 
         while (midi_get(&st, &d1, &d2)) {       /* MIDI in, USB and the jack: any channel, or the one picked */
-            if (st < 0xF0u && ui[UI_MCH] && (st & 0x0Fu) != ui[UI_MCH] - 1u)
-                continue;
-            if ((st & 0xF0u) == 0x90u && d2) { sp_note = d1; ev_push(EV_ON, d1, d2); }
-            else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) ev_push(EV_OFF, d1, 0);
-            else if ((st & 0xF0u) == 0xB0u && d1 == 123u) ev_push(EV_PANIC, 0, 0);
-            else if ((st & 0xF0u) == 0xB0u && d1 == 0u) pc_bank = d2;   /* bank select, for the next PC */
+            int action = fm_midi_dispatch(st,d1,d2);
+            if (action == MI_LEARNED) { set_take(&set); dirty = 1; t_change = fm1_ms; }
+            if (action != MI_IGNORED) continue;
+            if ((st & 0xF0u) == 0xB0u && d1 == 0u) pc_bank = d2;   /* bank select, for the next PC */
             else if ((st & 0xF0u) == 0xC0u && ui[UI_PCH] && !saving &&
                      (pc_bank >= 1u && pc_bank <= NBANK ? d1 < BANK_V : 1)) {   /* 0..127 are all in the list */
                 /* bank 0 (or none): program N is the voice list's N+1; bank 1..8: slot N+1 of U1..U8 */
@@ -5165,7 +5511,7 @@ static void app_main(void)
         fm1_led_key(BTN_LFO, page == PAGE_LFO || focus == FOC_LFO);
         fm1_led_key(BTN_GLO, page == PAGE_GLO);
         fm1_led_key(BTN_FX, page == PAGE_FX || focus == FOC_FX);
-        fm1_led_key(BTN_SEL, opmute != 0u);                /* something is off: you are not hearing it all */
+        fm1_led_key(BTN_SEL, mi_editor ? mi_learn : opmute != 0u);
         fm1_led_key(BTN_ARP, arp_on);
         fm1_led_key_glow(BTN_ARP, ui[UI_LATCH]);           /* latched, whether or not it is running */
         fm1_led_key(BTN_SEQ, (focus == FOC_SEQ && page == PAGE_HOME) || page == PAGE_STEP);
@@ -5180,6 +5526,8 @@ static void app_main(void)
         if (flash_msg && fm1_ms - flash_at > 1500u)
             flash_msg = 0;
 
+        if (mi_editor) mi_draw();
+        else {
         if (page != page_drawn || bank != bank_drawn2) {   /* a new screen: clear once, then only
                                                             * what changes */
             page_drawn = page;
@@ -5187,6 +5535,7 @@ static void app_main(void)
             bank_drawn = op_drawn = 255;
             alg_drawn = alg_op_drawn = 255;
             eg_dirty = 1;
+            diagnostics_fresh = 1;
             repaint_meter = 1;
             for (k = 0; k < 240u; k++)
                 sp_pk[k] = 0;
@@ -5285,6 +5634,10 @@ static void app_main(void)
                 draw_eg_cells();
                 eg_dirty = 1;
             }
+        } else if (glo_diagnostics()) {
+            if (diagnostics_fresh || fm1_ms-t_diagnostics >= 250u) {
+                draw_diagnostics(nv); t_diagnostics = fm1_ms; diagnostics_fresh = 0;
+            }
         } else if (page == PAGE_STEP) {
             draw_steps();                       /* every pass: it draws only what moved */
         } else {
@@ -5366,13 +5719,18 @@ static void app_main(void)
             }
         }
 
-        if (dirty && !v_lit && !seq_run && !(arp_on && chord_n) && fm1_ms - t_change > 2000u) {
+        }
+        if (dirty && midi_quiet_blocks >= 20u && !v_lit && !seq_run &&
+            !(arp_on && chord_n) && fm1_ms - t_change > 2000u) {
             /* an erase stalls the sound: save when silent, and not in the gaps of a loop, which the
              * stall would put out of time */
             set.voice = (uint8_t)voice;
             set.voice_hi = (uint8_t)(voice >> 8);
-            settings_save(&set, sizeof set);
-            dirty = 0;
+            if (!fm_settings_write(&set)) {
+                dirty = mi_dirty = 0; mi_drawn = ~0u;
+            } else {
+                say("SETTINGS SAVE FAILED"); t_change = fm1_ms; mi_feedback = 5; mi_drawn = ~0u;
+            }
         }
     }
 }
