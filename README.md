@@ -990,3 +990,5 @@ as dxsloop (zvenson) carries it; the factory voices are Sven Trogus's, from dxsl
 
 **No Yamaha or M-VAVE voice data is in this repository**, and none should be added: every factory voice was
 designed from scratch for dxsloop and is written out in `tools/gen_voices.py`.
+
+You can also try FM Lab in the browser, no flashing needed, in the free community [FM-1 Emulator](https://fm1-emulator.atst.tools/).
