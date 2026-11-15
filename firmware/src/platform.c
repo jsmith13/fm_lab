@@ -25,6 +25,9 @@ enum { ENC_SELECT = 0, ENC_ALGORITHM = 1, ENC_KNOB1 = 2, ENC_KNOB2 = 3, ENC_KNOB
 
 #ifdef DINGHY_HOST
 #include "../../tests/host.c"                  /* on a computer: a fake FM-1 (tests/host.c) */
+#ifdef FM_CPU1
+#include "../../tests/cpu1_sim.h"
+#endif
 #else
 #include <stdint.h>
 #include "fm1_time.h"
@@ -37,6 +40,30 @@ enum { ENC_SELECT = 0, ENC_ALGORITHM = 1, ENC_KNOB1 = 2, ENC_KNOB2 = 3, ENC_KNOB
 #include "fm1_audio.h"
 #include "fm1_adc.h"
 #include "bootguard.h"
+
+#if FM1_CPU1
+#include "fm1_cpu1.h"
+static uint32_t cpu1_boot_rails[2], cpu1_probe[64];
+static void cpu1_probe_job(uint32_t arg)
+{
+    uint32_t *p = (uint32_t *)(uintptr_t)arg, i;
+    for (i = 0; i < 64u; i++) p[i] = ~p[i];
+}
+static void cpu1_boot(void)
+{
+    uint32_t i, pass;
+    fm1_cpu1_bar_build(FM1_CPU1_BUILD_ID);
+    cpu1_boot_rails[0] = fm1_p33_read(9)&15u;
+    cpu1_boot_rails[1] = fm1_p33_read(6)&7u;
+    if (fm1_cpu1_start()) return;
+    for (pass = 0; pass < 4u; pass++) {
+        for (i = 0; i < 64u; i++) cpu1_probe[i] = (0x13579BDFu << pass)^i;
+        if (!fm1_cpu1_run(cpu1_probe_job,(uint32_t)(uintptr_t)cpu1_probe) || fm1_cpu1_wait()) return;
+        for (i = 0; i < 64u; i++)
+            if (cpu1_probe[i] != ~((0x13579BDFu << pass)^i)) { fm1_cpu1_retire(6); return; }
+    }
+}
+#endif
 
 #ifndef APP_NAME
 #define APP_NAME "FM LAB"
@@ -414,6 +441,10 @@ void fm1_cstart(void)
     extern uint32_t _data_start[], _data_end[], _data_load[], _bss_start[], _bss_end[];
     extern uint32_t _pool_start[], _pool_end[], _rt_start[], _rt_end[], _rt_load[];
     uint32_t *s, *d, p3, boot_mode;
+#if FM1_CPU1
+    extern uint32_t _c1_start[], _c1_end[], _c1_load[];
+    fm1_cpu1_stop();
+#endif
     fm1_time_init();
     fm1_reset_reason();
     p3 = fm1_boot.p3_rst;
@@ -428,6 +459,9 @@ void fm1_cstart(void)
     for (d = _pool_start; d < _pool_end; d++) *d = 0;
     for (s = _data_load, d = _data_start; d < _data_end; s++, d++) *d = *s;
     for (s = _rt_load, d = _rt_start; d < _rt_end; s++, d++) *d = *s;
+#if FM1_CPU1
+    for (s = _c1_load, d = _c1_start; d < _c1_end; s++, d++) *d = *s;
+#endif
     fm1_mailbox_clear();
     fm1_guard_enable(FM1_GUARD_STACK | FM1_GUARD_WRITE | FM1_GUARD_BUS | FM1_GUARD_PC);
     fm1_boot.p3_rst = (uint8_t)p3;
@@ -440,6 +474,9 @@ void fm1_cstart(void)
     lcd_fill(0, 0, 240, 240, C_BLACK);
     fm1_input_init();
     fm1_adc_init();
+#if FM1_CPU1
+    cpu1_boot();
+#endif
     fm1_audio_init(abuf, HALF_WORDS, isr_alnk0, 3);   /* (abuf is zero: .bss) */
     usb_start();
 #if FELUCCA_UART

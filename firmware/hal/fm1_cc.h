@@ -6,5 +6,13 @@
  * several callers. RAM-resident code (.ram_text) may only use these, never
  * a called helper (build.py checks .ram_text for calls). */
 #pragma once
+#include <stdint.h>
 
 #define FM1_INLINE static inline __attribute__((always_inline))
+
+static inline uint32_t fm1_cnum(void)
+{
+    uint32_t v;
+    __asm__ volatile("%0 = cnum" : "=r"(v));
+    return v;
+}

@@ -4,6 +4,36 @@ FM Lab's releases, newest first. Each one is on the
 [releases page](https://github.com/jsmith13/fm_lab/releases) with its `.fwsc`; the version a build is shows in
 GLOBAL's top-right corner. Versions are `MAJOR.MINOR.PATCH`: a patch fixes what was there, a minor adds to it.
 
+## 1.4.0 — 2026-11-15
+
+CPU1 rendering was tested on-device as `1.4.0-cpu1`; the user reported peak load falling from
+roughly 90% to 55% and approved this release. Final release identity is `FM-1_974`, on-screen
+BUILD `1.4.0`. The simplified release UI is host-validated, not re-flashed as part of publication.
+These observations do not qualify every patch, unit or long-term hardware behavior.
+
+### Added
+
+- Guarded CPU1 voice rendering, enabled by default: up to four staged DX voices with independent
+  operator scratch buffers and immutable render-rate/pitch-envelope snapshots.
+- Startup memory probe, RAM-idle flash gate, safe reset/update halt, request-time and callback
+  limits, and full-budget dispatch admission. Failed jobs are discarded; CPU0 re-renders original
+  voice state after retiring CPU1. Voltage and PLL/clock settings are unchanged.
+- Independent v1.3.3 serial-oracle threaded tests covering all algorithms/waves, both existing
+  operator rates, controllers, envelope interpolation and partial-worker failure recovery.
+
+### Changed
+
+- Removed the prototype-only GLOBAL 7 worker page. Original diagnostics remain GLOBAL 6/6,
+  with normal navigation, read-only knobs and SEL peak/LATE reset. CPU1 failure notification remains.
+- Builds enable CPU1 by default; `--single-core` produces a CPU1-free build. Host runners use
+  `FM_CPU1=0` for serial mode. No settings, patch, MIDI, allocation or sample-rate schema changes.
+
+### Safety and rollback
+
+- Preserve the 1.3.3 single-core firmware. Some units may retire CPU1; bounded recovery can still
+  miss an audio deadline. Do not interpret the reported load reduction as universal reliability.
+- Firmware rollback does not restore native sounds/settings lost when cross-flashing WT and FM.
+
 ## 1.3.3 — 2026-11-14
 
 The installed `1.3.3-test` was reported working well and approved for release on 2026-11-14.

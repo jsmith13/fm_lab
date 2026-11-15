@@ -36,6 +36,20 @@ says why each one works the way it does.
 
 ## The instrument
 
+**Guarded CPU1 rendering (1.4.0):** up to four voices render on the second core while CPU0
+keeps allocation, MIDI, global envelopes, filtering, effects and output. Each core has its own
+operator scratch buffers; rate and pitch-envelope settings are snapshotted for each job.
+The user reported peak load falling from roughly **90% to 55%** on the tested unit.
+This is a workload-specific observation, not a guarantee for every patch or FM-1.
+
+Voltages and PLL/clock settings are unchanged. Startup probes, bounded waits and flash/reset
+interlocks guard the worker; a failed job retires CPU1 and CPU0 continues from original voice state.
+The failure notice remains, but the prototype-only GLOBAL 7 page is removed.
+Normal diagnostics stay at **GLOBAL 6/6**. CPU1 can still fail on some hardware, and recovery
+cannot guarantee glitch-free audio. A retired core remains barred until cold power-off.
+The `1.3.3` single-core firmware rollback is retained.
+The CPU1 engine was tested on-device as `1.4.0-cpu1`; the final six-bank release UI is host-validated.
+
 **MIDI controller support (1.3.3):** hold **GLO** for the matching FM/WT assignment editor.
 Sustain, wheel, expression, bend and channel pressure now work, with sixteen global routes and
 on-device Learn. See [MIDI controls and Learn](docs/MIDI.md). Live MIDI does not edit saved patches.
@@ -745,7 +759,9 @@ git clone --depth 1 --branch AC79NN_SDK_V1.2.1_2023-12-13 \
 Then:
 
 ```sh
-./build.sh                                  # -> build/fmlab.fwsc
+./build.sh                                  # -> build/fmlab.fwsc, guarded CPU1 enabled
+./build.sh --release 1.4.0                   # -> build/fmlab-1.4.0.fwsc, FM-1_974
+./build.sh --single-core --check-only        # validate a CPU1-free target build
 tests/run_host.sh                           # -> build/host/fmlab.wav and screen PNGs, no FM-1 needed
 ```
 
@@ -768,6 +784,22 @@ FM-1 goes there by itself. Back to another firmware, or to the official one, wit
 [FM-1 Firmware Hub](https://fm1.designburgapps.com) in Chrome or Edge. Installing firmware is at your own risk.
 
 ## Trying a change without the hardware
+
+Host runners enable CPU1 by default; set `FM_CPU1=0` for the serial path.
+For the threaded voice/original-state oracle, extract the immutable 1.3.3 baseline from its Git tag:
+
+```sh
+mkdir -p build/cpu1-tests/serial-reference
+git show v1.3.3:firmware/src/dx7_core.c > build/cpu1-tests/serial-reference/dx7_core.c
+git show v1.3.3:firmware/src/dx7_tables.h > build/cpu1-tests/serial-reference/dx7_tables.h
+cc -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-function -pthread \
+  -fsanitize=address,undefined -fno-sanitize-recover=all -Ifirmware/src \
+  tests/cpu1_host.c tests/cpu1_reference.c -o build/cpu1-tests/voices-asan
+ASAN_OPTIONS=detect_leaks=0 build/cpu1-tests/voices-asan
+```
+
+This requires a Git checkout with `v1.3.3` available, not only a release source ZIP.
+Use `-fsanitize=thread -no-pie` instead of the ASan/UBSan flags for the race-detector run.
 
 The flash compatibility test uses the same chip checks and completion loop as the RAM driver. It covers
 both known chips, unknown IDs, slow and stuck operations, and timer wraparound:

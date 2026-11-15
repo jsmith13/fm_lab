@@ -12,6 +12,9 @@
 #pragma once
 #include <stdint.h>
 #include "fm1_xip.h"
+#if FM1_CPU1
+#include "fm1_flash_access.h"
+#endif
 
 #define RAMFN  __attribute__((section(".ram_text"), noinline, used))
 #define RAMINL static inline __attribute__((always_inline))
@@ -96,6 +99,9 @@ RAMINL void fl_wren(void) { fl_cs(0); fl_tx(0x06); fl_cs(1); }
 RAMINL int fl_enter(fl_saved_t *s)
 {
     uint32_t mode;
+#if FM1_CPU1
+    if (!fm1_flash_access_ok()) return -1;
+#endif
     fl_cache_idle();
     s->sfc_con = SFC_CON;
     s->spi_con = SPI0_CON;
@@ -135,6 +141,9 @@ RAMINL void fl_inval(uint32_t off, uint32_t len)
  * recovery, then restart the CPU from RAM without resuming flash execution. */
 RAMINL __attribute__((noreturn)) void fl_reset_busy(void)
 {
+#if FM1_CPU1
+    fm1_cpu1_stop();
+#endif
     uint32_t t0;
     fl_cs(0); fl_tx(0x66); fl_cs(1);             /* reset enable */
     fl_cs(0); fl_tx(0x99); fl_cs(1);             /* reset */
@@ -231,8 +240,10 @@ static void fl_plain_window_init(void)
     __asm__ volatile("csync\n\tsti" ::: "memory");
 }
 
+#if !FM1_CPU1
 static inline uint32_t irq_save(void) { __asm__ volatile("cli" ::: "memory"); return 0; }
 static inline void irq_restore(uint32_t f) { (void)f; __asm__ volatile("csync\n\tsti" ::: "memory"); }
+#endif
 
 static int fl_erase4k(uint32_t off, uint32_t *took_us)
 {

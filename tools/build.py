@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
-"""Build FM Lab (on Dinghy / Felucca / SLOOP's platform): the app, the update loader and an installable .fwsc package.
+"""Build FM Lab on Dinghy / Felucca / SLOOP's platform.
 
-  tools/build.py [--release X.Y[-suffix]]
+  tools/build.py --check-only
+  tools/build.py --product FM-1_9NN [--release X.Y[-suffix]]
 
 Outputs in build/: fmlab.bin (app), loader/ota.bin (update loader),
 fmlab.fwsc (package). See README.md for the toolchain and the SDK.
@@ -13,6 +14,7 @@ macOS (or with JIELI_DOCKER=1) each tool runs in a linux/amd64 container.
 """
 import argparse
 import hashlib
+import json
 import os
 import platform
 import re
@@ -47,8 +49,40 @@ SDK_SHA256 = {
     "cfg/eq_cfg_hw.bin": "41167491bffed4651750719c973d2758adeb9021a5670d02d6a53c85ed80ea7d",
 }
 
-PRODUCT = "FM-1_970"                # FM Lab: 97N (OUR_LOADER in the installer wants FM-1_9NN). Your fork: pick your own
+PRODUCT = "FM-1_970"
 VERSION = None                      # APP_VER for release builds
+EXTRA = []
+MEMORY = {"ram": ("_bss_end", 0x01C08000, 98304),
+          "pool": ("_pool_end", 0x01C20000, 344064),
+          "ram_text": ("_c1_end", 0x01C00000, 24576)}
+
+
+def memory_usage(syms):
+    result = {}
+    for name, (symbol, base, _) in MEMORY.items():
+        match = re.search(r"^([0-9a-f]+) .*\s" + symbol + r"$", syms, re.M)
+        result[name] = int(match[1], 16) - base if match else None
+    return result
+
+
+def write_report(img, ota, syms, notes, package=None):
+    inputs = sorted(p for p in FW.rglob("*") if p.is_file() and p.suffix in (".c", ".h", ".S", ".ld"))
+    inputs += [SRC / "tools" / name for name in
+               ("build.py", "fm1pkg_make.py", "lz4blk.py", "gen_voices.py")]
+    sources = {p.relative_to(SRC).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
+    def artifact(data):
+        return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    files = {"app": artifact(img), "loader": artifact(ota)}
+    if package is not None:
+        files["package"] = artifact(package)
+    report = {"schema": 1, "identity": PRODUCT, "version": VERSION or "DEV",
+              "installable_package": package is not None, "hardware_validation": "not established by build",
+              "artifacts": files, "memory_bytes": memory_usage(syms), "checks": notes,
+              "source_sha256": sources}
+    report["cpu1_enabled"] = bool(EXTRA)
+    report["power_policy"] = "unchanged voltages and PLL/clock"
+    report["cpu1_job_timeout_us"] = 600 if EXTRA else None
+    (OUT / "fmlab-build.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 
 
 def toolchain():
@@ -122,8 +156,8 @@ def ldr_wrap(image):
 def build_loader():
     LDR.mkdir(parents=True, exist_ok=True)
     src = FW / "loader"
-    flags = [*CFLAGS, "-Ifirmware/hal", "-Ifirmware/src"]
-    tc_all(("cc", "-c", src / "crt0_ldr.S", "-o", LDR / "crt0_ldr.o"),
+    flags = [*CFLAGS, *EXTRA, "-Ifirmware/hal", "-Ifirmware/src"]
+    tc_all(("cc", *EXTRA, "-c", src / "crt0_ldr.S", "-o", LDR / "crt0_ldr.o"),
            ("cc", *flags, "-c", src / "loader.c", "-o", LDR / "loader.o"))
     elf = LDR / "loader.elf"
     tc("pi32v2/bin/ld", "--gc-sections", "-e", "_start", "-T", src / "loader.ld",
@@ -150,31 +184,35 @@ def build_loader():
 
 # ---- app
 
-def build_app():
-    flags = [*CFLAGS, "-Ifirmware/hal", "-Ifirmware/src", "-Ifirmware/gen", f'-DFELUCCA_ID="{PRODUCT}"', f'-DAPP_VER="{VERSION or "DEV"}"']
-    cmds = [("cc", "-c", FW / "crt0.S", "-o", OUT / "crt0.o"),
-            ("cc", "-c", FW / "hal" / "fm1_vec.S", "-o", OUT / "fm1_vec.o"),
+def build_app(source=None, stem="fmlab"):
+    source = source if source is not None else FW / "src" / "fmlab.c"
+    flags = [*CFLAGS, *EXTRA, "-Ifirmware/hal", "-Ifirmware/src", "-Ifirmware/gen", f'-DFELUCCA_ID="{PRODUCT}"', f'-DAPP_VER="{VERSION or "DEV"}"']
+    cmds = [("cc", *EXTRA, "-c", FW / "crt0.S", "-o", OUT / "crt0.o"),
+            ("cc", *EXTRA, "-c", FW / "hal" / "fm1_vec.S", "-o", OUT / "fm1_vec.o"),
             ("cc", "-c", FW / "hal" / "fm1_isr.S", "-o", OUT / "fm1_isr.o"),
-            ("cc", *flags, "-c", FW / "src" / "fmlab.c", "-o", OUT / "fmlab.o")]
+            ("cc", *flags, "-c", source, "-o", OUT / f"{stem}.o")]
+    if EXTRA:
+        cmds.append(("cc", *EXTRA, "-c", FW / "hal" / "fm1_cpu1.S", "-o", OUT / "fm1_cpu1.o"))
     tc_all(*cmds)
-    elf = OUT / "fmlab.elf"
+    elf = OUT / f"{stem}.elf"
     tc("pi32v2/bin/ld", "--gc-sections", "-e", "_start", "-T", FW / "app.ld", OUT / "crt0.o", OUT / "fm1_vec.o",
-       OUT / "fm1_isr.o", OUT / "fmlab.o", "-o", elf)
-    for sect in ("text.bin", "data.bin", "ramtext.bin"):
+       OUT / "fm1_isr.o", OUT / f"{stem}.o", *([OUT / "fm1_cpu1.o"] if EXTRA else []), "-o", elf)
+    for sect in ("text.bin", "data.bin", "ramtext.bin", "cpu1text.bin"):
         (OUT / sect).unlink(missing_ok=True)
     *_, syms, dis, rt = tc_all(("common/bin/objcopy", "-O", "binary", "-j", ".text", elf, OUT / "text.bin"),
                                ("common/bin/objcopy", "-O", "binary", "-j", ".data", elf, OUT / "data.bin"),
                                ("common/bin/objcopy", "-O", "binary", "-j", ".ram_text", elf, OUT / "ramtext.bin"),
+                               ("common/bin/objcopy", "-O", "binary", "-j", ".c1_text", elf, OUT / "cpu1text.bin"),
                                ("common/bin/objdump", "-t", elf),
                                ("common/bin/objdump", "-d", elf),
                                ("common/bin/objdump", "-d", "-j", ".ram_text", elf))
-    (OUT / "fmlab.dis").write_text(dis)
+    (OUT / f"{stem}.dis").write_text(dis)
 
     def symv(name):
         return int(re.search(r"^([0-9a-f]+) .*\s" + name + r"$", syms, re.M).group(1), 16)
     img = bytearray((OUT / "text.bin").read_bytes())
     # .ram_text and .data follow .text at their load addresses; crt0 copies them by words
-    for sect, lname in (("ramtext.bin", "_rt_load"), ("data.bin", "_data_load")):
+    for sect, lname in (("ramtext.bin", "_rt_load"), ("cpu1text.bin", "_c1_load"), ("data.bin", "_data_load")):
         load = symv(lname)
         if load % 4:
             raise SystemExit(f"{lname} {load:#x} is not word aligned")
@@ -185,7 +223,7 @@ def build_app():
             img += b"\xff" * (load - APP_XIP - len(img))
             img += blob
     img += b"\xff" * (-len(img) % 4)
-    (OUT / "fmlab.bin").write_bytes(img)
+    (OUT / f"{stem}.bin").write_bytes(img)
     return bytes(img), syms, dis, rt
 
 
@@ -212,14 +250,15 @@ def check(img, syms, dis, rt):
     if len(img) > APP_SLOT:
         errors.append(f"image {len(img)} B exceeds the app slot")
 
-    def sym(name):
-        mm = re.search(r"^([0-9a-f]+) .*\s" + name + r"$", syms, re.M)
-        return int(mm.group(1), 16) if mm else 0
-    ram = sym("_bss_end") - 0x01C08000
-    pool = sym("_pool_end") - 0x01C20000
+    usage = memory_usage(syms)
+    ram, pool = usage["ram"], usage["pool"]
     notes.append(f"image {len(img)} B of {APP_SLOT}; RAM .data+.bss {ram} B of 98304; pool {pool} B of 344064")
-    if ram > 96 * 1024:
-        errors.append(f"RAM .data+.bss {ram} B > 96 KiB")
+    for name, (_, _, limit) in MEMORY.items():
+        used = usage[name]
+        if used is None:
+            errors.append(f"{name}: missing end symbol")
+        elif not 0 <= used <= limit:
+            errors.append(f"{name}: {used} B outside 0..{limit} B")
     return errors, notes
 
 
@@ -268,24 +307,46 @@ def mmio_check():
 
 
 def main():
-    global PRODUCT, VERSION
+    global PRODUCT, VERSION, EXTRA
     ap = argparse.ArgumentParser()
-    ap.add_argument("--release", metavar="X.Y", help="release build: identity FM-1_9XY, version string X.Y")
+    ap.add_argument("--release", metavar="X.Y", help="release version: X.Y, X.Y.Z or X.Y-suffix")
+    ap.add_argument("--product", metavar="FM-1_97N", help="override identity (release defaults to its minor version)")
+    ap.add_argument("--check-only", action="store_true", help="build and check without making an installable package")
+    cores = ap.add_mutually_exclusive_group()
+    cores.add_argument("--cpu1", action="store_true", default=True, help="guarded voice worker (default); unchanged voltage/clock")
+    cores.add_argument("--single-core", action="store_false", dest="cpu1", help="build without the CPU1 worker")
     ap.add_argument("--sdk", type=Path, help="JieLi AC79 SDK checkout (default: $AC79_SDK)")
     a = ap.parse_args()
+    if a.product:
+        if not re.fullmatch(r"FM-1_9[0-9]{2}", a.product):
+            ap.error("--product must have the form FM-1_9NN (two decimal digits)")
+        if not a.product.startswith("FM-1_97"):
+            ap.error("FM Lab uses FM-1_97N; keep the WT identity separate")
+        PRODUCT = a.product
     name = "fmlab.fwsc"
-    if a.release:                   # one digit each: the identity has room for two (X.Y; a .Z only in the text)
+    if a.release:
         m = re.fullmatch(r"(\d)\.(\d)(\.\d)?(-[A-Za-z0-9]+)?", a.release)
         if not m:
             raise SystemExit(f"--release {a.release}: use X.Y, X.Y.Z or X.Y-suffix, one digit each")
-        PRODUCT = "FM-1_97" + m[2]
-        VERSION = m[1] + "." + m[2] + (m[3] or "")
+        VERSION = a.release
+        if not a.product:
+            PRODUCT = "FM-1_97"+m[2]
         name = f"fmlab-{a.release}.fwsc"
+    if a.cpu1:
+        fingerprint = hashlib.sha256()
+        for path in sorted(FW.rglob("*")):
+            if path.is_file():
+                fingerprint.update(path.read_bytes())
+        build_id = int.from_bytes(fingerprint.digest()[:4], "little")
+        EXTRA = ["-DFM_CPU1=1", "-DFM1_CPU1=1", "-DFM1_CPU1_FALLBACK=1",
+                 "-DFM1_CPU1_TIMEOUT_US=600", f"-DFM1_CPU1_BUILD_ID={build_id}u"]
     fm1pkg_make.SDK = a.sdk
-    for rel, sha in SDK_SHA256.items():          # fail early without the SDK
-        if hashlib.sha256(fm1pkg_make.sdk_file(rel)).hexdigest() != sha:
-            print(f"warning: SDK {rel} differs from AC79NN_SDK_V1.2.1; the package will not match the reference")
+    if not a.check_only:
+        for rel, sha in SDK_SHA256.items():      # fail early without the SDK when packaging
+            if hashlib.sha256(fm1pkg_make.sdk_file(rel)).hexdigest() != sha:
+                print(f"warning: SDK {rel} differs from AC79NN_SDK_V1.2.1; the package will not match the reference")
     OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "fmlab-build.json").unlink(missing_ok=True)
     ota = build_loader()
     img, syms, dis, rt = build_app()
     errors, notes = check(img, syms, dis, rt)
@@ -299,8 +360,13 @@ def main():
         print("  FAIL ", e)
     if errors:
         raise SystemExit("build: checks failed")
+    if a.check_only:
+        write_report(img, ota, syms, notes)
+        print(f"check-only: app and loader validated, identity {PRODUCT}; no installable package written")
+        return 0
     pkg = fm1pkg_make.ufw(fm1pkg_make.flash_image(img, fm1pkg_make.KEY), ota, PRODUCT)
     (OUT / name).write_bytes(pkg)
+    write_report(img, ota, syms, notes, pkg)
     print(f"app      {OUT / 'fmlab.bin'}  {len(img)} B")
     print(f"loader   {LDR / 'ota.bin'}  {len(ota)} B")
     print(f"package  {OUT / name}  {len(pkg)} B, identity {PRODUCT}")

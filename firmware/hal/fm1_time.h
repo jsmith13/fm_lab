@@ -28,6 +28,7 @@ static inline void fm1_time_init(void)
 }
 
 static inline uint32_t fm1_ticks(void) { return FM1_T4_CNT; }
+static inline uint32_t fm1_uptime_ms(void) { return fm1_ticks() / 24000u; }
 
 /* Microseconds, wrapping every ~178.9 s. */
 static inline uint32_t fm1_micros(void) { return FM1_T4_CNT / FM1_TICKS_PER_US; }

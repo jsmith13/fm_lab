@@ -80,6 +80,9 @@
 #include <stddef.h>
 
 #define NV 8u                                   /* voices (RAM: 428 B each) */
+#ifdef FM_CPU1
+#include "fm_cpu1.c"
+#endif
 
 /* ---- the patch. `edit` is the main loop's own copy and the one the knobs change; pbuf is the pair
  * the ISR reads from. A change goes: edit -> the spare pbuf -> publish -> flip -> tell the ISR. The
@@ -839,6 +842,9 @@ static void cpu_reset_pending(void)
     if (generation == cpu_reset_seen) return;
     cpu_peak = cpu_late = 0;
     memset(cpu_profiles,0,sizeof cpu_profiles);
+#ifdef FM_CPU1
+    fm_cpu1_dsp_peak = fm_cpu1_wait_peak = 0;
+#endif
     cpu_reset_seen = generation;
 }
 
@@ -1278,9 +1284,12 @@ static void app_audio(int32_t *out, uint32_t n)
     uint32_t b, v, i, lit = 0, peak = 0, t0 = fm1_ticks(), tick, start;
     cpu_profile_t parts = {0};
     uint32_t ge;
-    uint32_t os = os_want ? 1u : 0u, m = DX_N << os, lg = DX_LG_N + os;
-    int32_t g0, controller_pitch;
+    uint32_t os = os_want ? 1u : 0u, m = DX_N << os;
+    int32_t controller_pitch;
 
+#ifdef FM_CPU1
+    fm_cpu1_begin(t0,n);
+#endif
     cpu_reset_pending();
     mi_audio_sync(); fm_midi_prepare(&ft,&live_effects);
     ev_drain();
@@ -1306,7 +1315,25 @@ static void app_audio(int32_t *out, uint32_t n)
         start = fm1_ticks(); parts.control += start-tick;
         for (i = 0; i < m; i++)
             mono[i] = 0;
+#ifdef FM_CPU1
+        {
+            int32_t gain0[NV] = {0}, gain1[NV] = {0};
+            uint32_t active = 0;
+            for (v = 0; v < NV; v++) {
+                if (!dxv[v].on) continue;
+                dxv[v].bright = midi_brightness; dxv[v].controller_vibrato = midi_vibrato;
+                dxv[v].controller_bias = midi_bias; dxv[v].controller_mutes = opmute;
+                gain0[v] = genv[v].g >> 12;
+                genv_block(v); gain1[v] = genv[v].g >> 12;
+                if (!dx_playing(&dxv[v]) || genv[v].st == GS_OFF) { dxv[v].on = 0; continue; }
+                active |= 1u << v; lit |= 1u << v;
+            }
+            fm_cpu1_render(dxv,mono,active,gain0,gain1,ge,controller_pitch,os,dx_peg_off);
+        }
+#else
         for (v = 0; v < NV; v++) {
+            int32_t g0;
+            uint32_t lg = DX_LG_N+os;
             if (!dxv[v].on)
                 continue;
             dxv[v].bright = midi_brightness; dxv[v].controller_vibrato = midi_vibrato;
@@ -1338,6 +1365,7 @@ static void app_audio(int32_t *out, uint32_t n)
                 }
             }
         }
+#endif
         if (os)
             hb_down(mono);
         else
@@ -4863,6 +4891,9 @@ static void app_main(void)
     uint8_t latch_was;
     uint8_t alg_drawn = 255, alg_op_drawn = 255, mute_drawn = 255, leg_drawn = 255;
     uint32_t lfo_sig_drawn = ~0u;               /* the LFO picture on HOME follows its own bytes */
+#ifdef FM_CPU1
+    uint32_t cpu1_failure_seen = 0;
+#endif
 
     bank_init();                                /* before the first load_voice: a slot may be the voice */
     mi_init(); set.midi = mi_config;
@@ -4933,6 +4964,12 @@ static void app_main(void)
         uint8_t st, d1, d2;
         sx_bank = (uint8_t)(voice >= DX_NVOICES ? (voice - DX_NVOICES) / BANK_V : set.slot / BANK_V);
         platform_poll();                    /* (a bank arriving in there goes into sx_bank) */
+#ifdef FM_CPU1
+        if (fm1_cpu1_gave_up && cpu1_failure_seen != fm1_cpu1_gave_up) {
+            cpu1_failure_seen = fm1_cpu1_gave_up;
+            say("CPU1 FAILED / CPU0 FALLBACK");
+        }
+#endif
         glo_sync();                         /* whatever moved the four bytes, the ISR has them */
         flt_sync();                         /* ..and the filter's three, if they moved */
         fx_sync();                          /* ..and the effects' sixteen */

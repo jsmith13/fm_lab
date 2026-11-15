@@ -198,12 +198,22 @@ int main(void)
     mi_knob(3,100); CHECK(mi_config.bend_range == 24u,"BEND knob clamps to the global maximum");
     mi_knob(3,-100); CHECK(!mi_config.bend_range,"BEND knob clamps to the global minimum");
     reset(); page = PAGE_HOME; focus = FOC_OFF;
-    page_to(PAGE_GLO); sel_step((int32_t)page_nbank()-1);
+    page_to(PAGE_GLO); sel_step(GLO_DIAGNOSTICS_BANK);
     CHECK(glo_diagnostics() && !bank_has_op() && !page_at(bank_first(bank)),
-          "GLOBAL ends with a read-only diagnostics bank, not an operator or patch parameter");
+          "GLOBAL retains its read-only diagnostics bank, not an operator or patch parameter");
     draw_diagnostics(3);
+    bank = (uint8_t)(page_nbank()-1u);
     page_to(PAGE_GLO); CHECK(!bank && !glo_diagnostics(),"GLO wraps diagnostics to the first settings bank");
-    sel_step(-1); CHECK(glo_diagnostics(),"SELECT reaches diagnostics from either direction");
+    sel_step(-1);
+#ifdef FM_CPU1
+    CHECK(glo_diagnostics() && page_nbank() == 6u,
+          "CPU1 release keeps six GLOBAL banks with no extra worker page");
+    fm_cpu1_dsp_peak = 234; fm_cpu1_wait_peak = 226; fm_cpu1_failures = 9;
+    cpu_request_reset(); cpu_reset_pending();
+    CHECK(!fm_cpu1_dsp_peak && !fm_cpu1_wait_peak && fm_cpu1_failures == 9,
+          "audio-owned meter reset clears worker peaks without erasing failure history");
+#endif
+    CHECK(glo_diagnostics(),"SELECT reaches original diagnostics from either direction");
     {
         uint32_t budget = BUDGET_US*FM1_TICKS_PER_US;
         cpu_profile_t parts = {0,budget/4u,budget/8u,budget/16u,budget/16u};

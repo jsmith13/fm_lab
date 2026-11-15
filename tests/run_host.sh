@@ -21,10 +21,12 @@ if [ -n "$script" ]; then
     name=${script##*/}
     out=build/host/${name%.*}
 fi
-cc -O2 -Wall -Wno-unused-function -DDINGHY_HOST -DAPP_VER="\"${APP_VER:-DEV}\"" -Ifirmware/src -Ifirmware/gen -o build/host/fmlab firmware/src/fmlab.c
+cpu1_flag=
+if [ "${FM_CPU1:-1}" != 0 ]; then cpu1_flag=-DFM_CPU1=1; fi
+cc -O2 -Wall -Wno-unused-function $cpu1_flag -DDINGHY_HOST -DAPP_VER="\"${APP_VER:-DEV}\"" -Ifirmware/src -Ifirmware/gen -o build/host/fmlab firmware/src/fmlab.c
 case "$script" in
 */controllers.txt|*/diagnostics.txt)
-    cc -O2 -Wall -Wno-unused-function -Ifirmware/src -Ifirmware/gen -o build/host/midi_host tests/midi_host.c
+    cc -O2 -Wall -Wno-unused-function $cpu1_flag -Ifirmware/src -Ifirmware/gen -o build/host/midi_host tests/midi_host.c
     build/host/midi_host ;;
 esac
 rm -f "$out"-*.ppm "$out"-*.png "$out"-bank.bin "$out"-out.syx   # the bank outlives a run, as flash does

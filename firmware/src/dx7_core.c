@@ -537,10 +537,10 @@ static int dx_playing(const dxv_t *v)          /* any carrier envelope still act
  * caller takes the 2 * DX_N samples back down. The envelopes and the LFO still move once a block. */
 static uint8_t dx_os;
 static void dx_op(int32_t *out, const int32_t *in, int32_t phase, int32_t freq, int32_t g1, int32_t g2, int add,
-                  int w)
+                  int w, uint32_t os)
 {
-    int n = DX_N << dx_os;
-    int32_t dg = (g2 - g1 + (n >> 1)) >> (DX_LG_N + dx_os), g = g1;
+    int n = DX_N << os;
+    int32_t dg = (g2 - g1 + (n >> 1)) >> (DX_LG_N + os), g = g1;
     int i;
     if (w) {
         for (i = 0; i < n; i++) {
@@ -562,10 +562,10 @@ static void dx_op(int32_t *out, const int32_t *in, int32_t phase, int32_t freq, 
 }
 
 static void dx_op_fb(int32_t *out, int32_t phase, int32_t freq, int32_t g1, int32_t g2, int32_t *fb, int shift,
-                     int add, int w)
+                     int add, int w, uint32_t os)
 {
-    int n = DX_N << dx_os;
-    int32_t dg = (g2 - g1 + (n >> 1)) >> (DX_LG_N + dx_os), g = g1, y0 = fb[0], y = fb[1];
+    int n = DX_N << os;
+    int32_t dg = (g2 - g1 + (n >> 1)) >> (DX_LG_N + os), g = g1, y0 = fb[0], y = fb[1];
     int i;
     if (w) {
         for (i = 0; i < n; i++) {
@@ -599,9 +599,9 @@ static void dx_op_fb(int32_t *out, int32_t phase, int32_t freq, int32_t g1, int3
  * lfo_delay as Dexed's synth gives them (dx_compute_lfo: the note's own) */
 static uint8_t dx_peg_off;                       /* FM Lab's: the pitch envelope runs, but is not heard */
 
-static void dx_compute_ext(dxv_t *v, int32_t *out, int32_t lfo_val, int32_t lfo_delay, int32_t pitch)
+static void dx_compute_state(dxv_t *v, int32_t *out, int32_t lfo_val, int32_t lfo_delay, int32_t pitch,
+                             int32_t bus[2][2 * DX_N], uint32_t os, uint32_t peg_off)
 {
-    static int32_t bus[2][2 * DX_N];
     int32_t fq[6];
     uint8_t has[3] = {1, 0, 0};
     int32_t pmod, amod, senslfo, pm1;
@@ -613,7 +613,7 @@ static void dx_compute_ext(dxv_t *v, int32_t *out, int32_t lfo_val, int32_t lfo_
     pm1 = (int32_t)(((int64_t)pmd * (int64_t)senslfo) >> 39);
     pm1 = pm1 < 0 ? -pm1 : pm1;
     pmod = dx_penv_sample(&v->penv);
-    if (dx_peg_off)
+    if (peg_off)
         pmod = 0;
     pmod += pm1 * (senslfo < 0 ? -1 : 1) + pitch;
     if (v->controller_vibrato) {
@@ -649,18 +649,18 @@ static void dx_compute_ext(dxv_t *v, int32_t *out, int32_t lfo_val, int32_t lfo_
         uint8_t fl = DX_ALG[v->alg][op];
         int add = (fl & 4) != 0, inb = (fl >> 4) & 3, outb = fl & 3;
         int32_t *o = outb == 0 ? out : bus[outb - 1];
-        int32_t g1 = v->gain[op], g2 = dx_exp2(v->level_in[op] - (14 * (1 << 24))), f = fq[op] >> dx_os;
+        int32_t g1 = v->gain[op], g2 = dx_exp2(v->level_in[op] - (14 * (1 << 24))), f = fq[op] >> os;
         v->gain[op] = g2;
         if (g1 >= 1120 || g2 >= 1120) {
             if (!has[outb])
                 add = 0;
             if (inb == 0 || !has[inb]) {
                 if ((fl & 0xc0) == 0xc0 && v->fb_shift < 16)
-                    dx_op_fb(o, v->phase[op], f, g1, g2, v->fb, v->fb_shift, add, v->wave[op]);
+                    dx_op_fb(o, v->phase[op], f, g1, g2, v->fb, v->fb_shift, add, v->wave[op], os);
                 else
-                    dx_op(o, 0, v->phase[op], f, g1, g2, add, v->wave[op]);
+                    dx_op(o, 0, v->phase[op], f, g1, g2, add, v->wave[op], os);
             } else {
-                dx_op(o, bus[inb - 1], v->phase[op], f, g1, g2, add, v->wave[op]);
+                dx_op(o, bus[inb - 1], v->phase[op], f, g1, g2, add, v->wave[op], os);
             }
             has[outb] = 1;
         } else if (!add) {
@@ -668,6 +668,12 @@ static void dx_compute_ext(dxv_t *v, int32_t *out, int32_t lfo_val, int32_t lfo_
         }
         v->phase[op] = (int32_t)((uint32_t)v->phase[op] + ((uint32_t)fq[op] << DX_LG_N));
     }
+}
+
+static void dx_compute_ext(dxv_t *v, int32_t *out, int32_t lfo_val, int32_t lfo_delay, int32_t pitch)
+{
+    static int32_t bus[2][2 * DX_N];
+    dx_compute_state(v,out,lfo_val,lfo_delay,pitch,bus,dx_os,dx_peg_off);
 }
 
 static void dx_compute(dxv_t *v, int32_t *out, int32_t pitch)

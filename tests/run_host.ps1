@@ -14,11 +14,13 @@ $ver = if ($env:APP_VER) { $env:APP_VER } else { 'DEV' }
 # msvc.h is force-included: cl is not gcc, and the host half of platform.c still carries one gcc attribute.
 $cl = "cl /nologo /TC /O2 /W3 /DDINGHY_HOST /DAPP_VER=\""$ver\"" /Itests /FImsvc.h " +
       "/Ifirmware\src /Ifirmware\gen firmware\src\fmlab.c /Fo:build\host\ /Fe:build\host\fmlab.exe"
+if ($env:FM_CPU1 -ne '0') { $cl += ' /DFM_CPU1=1' }
 & $env:ComSpec /c "call `"$vcvars`" >nul && $cl"
 if ($LASTEXITCODE) { throw 'build failed' }
 if ($args.Count -and [IO.Path]::GetFileName($args[0]) -in 'controllers.txt', 'diagnostics.txt') {
     $unit = 'cl /nologo /TC /O2 /W3 /Itests /FImsvc.h /Ifirmware\src /Ifirmware\gen ' +
             'tests\midi_host.c /Fo:build\host\midi_host.obj /Fe:build\host\midi_host.exe'
+    if ($env:FM_CPU1 -ne '0') { $unit += ' /DFM_CPU1=1' }
     & $env:ComSpec /c "call `"$vcvars`" >nul && $unit && build\host\midi_host.exe"
     if ($LASTEXITCODE) { throw 'MIDI controller unit checks failed' }
 }

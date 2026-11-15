@@ -1,5 +1,11 @@
 # Licensing
 
+FM Lab's CPU1 support adapts the MPL-2.0 worker, entry/stop, flash gate and exception-frame
+restoration from [felucca-bsp](https://github.com/hugelton/felucca-bsp), pinned revision
+`18eadadb8c364abd026accd2b1ea1c14ca347f06`. It reuses the guarded adaptations tested in WT Lab.
+Their attribution headers and file-level MPL obligations are retained; `LICENSE-MPL-2.0`
+contains the complete license. The new FM staging layer and tests are GPL-3.0-only.
+
 FM Lab is free software under the GNU General Public License, version 3 only (`GPL-3.0-only`, full text in
 `LICENSE`). You may use, study, change and share it. If you give someone a firmware built from it, give them
 its complete source under the same licence too.

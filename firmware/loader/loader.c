@@ -60,9 +60,7 @@ static int ldr_fread(uint32_t off, void *p, uint32_t n) { return fl_read_ram(off
 static int ldr_erase(uint32_t off)
 {
     uint32_t took;
-    int rc = fl_erase4k_ram(off, &took);
-    ldr_poll();
-    return rc;
+    return fl_erase4k_ram(off, &took);
 }
 static int ldr_prog(uint32_t off, const void *p, uint32_t n)
 {
@@ -110,6 +108,10 @@ void ldr_main(void)
 void ldr_cstart(void)
 {
     uint32_t *p;
+#if FM1_CPU1
+    fm1_cpu1_stop();
+    (void)irq_save();
+#endif
     ldr_record_clear();                             /* first thing: a crash below cannot loop through a
                                                      * warm reset; resume after power loss uses the flash record */
     for (p = _bss_start; p < _bss_end; p++)
